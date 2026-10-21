@@ -1,8 +1,5 @@
 # 构建并运行：./install-docker.sh（会生成 .env），或 docker compose up -d --build
-# HTTPS 由 cloudflared 提供，两种接法任选：
-#   1. VPS 上已装 cloudflared：Public Hostname 指向 http://127.0.0.1:8090
-#   2. 在 .env 填 TUNNEL_TOKEN，install-docker.sh 会一并启动下面的 cloudflared 容器，
-#      Public Hostname 指向 http://copyanywhere:8080
+# 只监听本机端口（默认 127.0.0.1:8090），HTTPS 由你自己的隧道 / 反代提供。
 services:
   copyanywhere:
     build: .
@@ -21,22 +18,6 @@ services:
     read_only: true
     tmpfs:
       - /tmp
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-
-  cloudflared:
-    profiles: [tunnel]
-    image: cloudflare/cloudflared:latest
-    container_name: copyanywhere-tunnel
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run
-    environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
-    depends_on:
-      - copyanywhere
-    read_only: true
     cap_drop:
       - ALL
     security_opt:

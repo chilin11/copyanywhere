@@ -3,7 +3,7 @@
 #
 #   ./install-docker.sh     构建并启动（首次会生成 .env 和随机密码）
 #
-# HTTPS 交给 cloudflared。.env 里填了 TUNNEL_TOKEN 时会同时启动 cloudflared 容器。
+# 只监听本机端口，HTTPS 由你自己的隧道 / 反代提供。
 # 重复运行是安全的：已有的 .env 和数据不会被覆盖。
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -35,14 +35,11 @@ envget() { sed -n "s/^$1=//p" .env | tail -1 | tr -d '"'"'"; }
 port="$(envget HOST_PORT)"; port="${port:-8090}"
 bind="$(envget BIND_HOST)"; bind="${bind:-127.0.0.1}"
 check="$bind"; [ "$bind" = "0.0.0.0" ] && check=127.0.0.1
-token="$(envget TUNNEL_TOKEN)"
 total="$(envget MAX_TOTAL_MB)"; total="${total:-5120}"
 
 # ---------- build & run ----------
-compose=(docker compose)
-[ -n "$token" ] && compose+=(--profile tunnel)
 log "构建并启动容器…"
-"${compose[@]}" up -d --build --remove-orphans
+docker compose up -d --build --remove-orphans
 for _ in $(seq 1 30); do
   curl -fsS "http://$check:$port/healthz" >/dev/null 2>&1 && break
   sleep 1
@@ -53,20 +50,10 @@ log "服务已运行：http://$check:$port"
 [ "$bind" = "0.0.0.0" ] && warn "BIND_HOST=0.0.0.0 会把未加密的 HTTP 端口暴露到公网，确认防火墙已拦截 $port"
 
 echo
-if [ -n "$token" ]; then
-  log "cloudflared 容器已启动（docker compose logs -f cloudflared 查看连接状态）"
-  echo "    在 Cloudflare Zero Trust → Tunnels → Public Hostname 里，"
-  echo "    把你的域名的 Service 设为：http://copyanywhere:8080"
-else
-  echo "下一步：在 cloudflared 里加一个 Public Hostname，Service 填 http://$check:$port"
-  echo "    · 已在 VPS 上运行 cloudflared：Zero Trust → Tunnels → 你的隧道 → Public Hostname"
-  echo "      （本地配置文件模式则在 config.yml 的 ingress 里加：service: http://$check:$port）"
-  echo "    · 还没有 cloudflared：在 Zero Trust 新建 Tunnel，把 token 填进 .env 的 TUNNEL_TOKEN，"
-  echo "      再运行一次 ./install-docker.sh，Service 填 http://copyanywhere:8080"
-fi
+echo "服务只监听 http://$check:$port ，把你的域名（隧道 / 反代）指向这个地址即可。"
 
 echo
-log "完成。打开 https://<你的域名> ，输入服务器密码创建空间，再用手机扫码添加设备。"
+log "完成。浏览器打开 https://<你的域名> ，输入服务器密码创建空间，其他设备扫码加入（不用密码）。"
 echo "    服务器密码：$(envget PASSWORD)"
 echo "    存储上限：$total MB（全部空间合计，满了自动删最旧的）"
 echo "    更新：git pull && ./install-docker.sh    日志：docker compose logs -f"

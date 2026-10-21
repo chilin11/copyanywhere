@@ -4,7 +4,6 @@
 # 直接从 GitHub 安装或更新（以后再运行同一条命令就是更新，配置和数据都保留）：
 #   curl -fsSL https://raw.githubusercontent.com/chilin11/copyanywhere/main/install.sh | sudo sh
 # 参数放在 "sh -s --" 后面：
-#   … | sudo sh -s -- --token <TOKEN>    同时安装 cloudflared 并接入这个 Tunnel
 #   … | sudo sh -s -- --port 8090        指定本机端口（默认 8090）
 #   … | sudo sh -s -- --uninstall        卸载程序（保留数据；加 --purge 连数据和配置一起删）
 # 也可以下载后运行：sudo sh install.sh [参数]
@@ -23,7 +22,6 @@ APP_DIR=/opt/copyanywhere
 DATA_DIR=/var/lib/copyanywhere
 CONF_DIR=/etc/copyanywhere
 ENV_FILE=$CONF_DIR/env
-TUNNEL_ENV=$CONF_DIR/tunnel.env
 SVC_USER=copyanywhere
 NODE_MAJOR=22   # downloaded when the system has no Node.js >= NODE_MIN
 NODE_MIN=20
@@ -33,14 +31,11 @@ warn() { printf '\033[1;33m注意:\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m错误:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ---------- arguments ----------
-TOKEN=${TUNNEL_TOKEN:-}
 PORT_ARG=
 MODE=install
 PURGE=0
 while [ $# -gt 0 ]; do
   case $1 in
-    --token) [ $# -ge 2 ] || die "--token 后面要跟 Tunnel token"; TOKEN=$2; shift 2 ;;
-    --token=*) TOKEN=${1#*=}; shift ;;
     --port) [ $# -ge 2 ] || die "--port 后面要跟端口号"; PORT_ARG=$2; shift 2 ;;
     --port=*) PORT_ARG=${1#*=}; shift ;;
     --uninstall) MODE=uninstall; shift ;;
@@ -52,12 +47,6 @@ done
 if [ -n "$PORT_ARG" ]; then
   case $PORT_ARG in ''|*[!0-9]*) die "端口必须是数字：$PORT_ARG" ;; esac
   [ "$PORT_ARG" -ge 1 ] && [ "$PORT_ARG" -le 65535 ] || die "端口超出范围：$PORT_ARG"
-fi
-if [ -n "$TOKEN" ]; then
-  # accept the whole "cloudflared service install eyJ…" command pasted from the dashboard
-  t=$(printf '%s' "$TOKEN" | grep -o 'eyJ[A-Za-z0-9+/=_-]*' | head -n 1 || true)
-  [ -n "$t" ] || die "Tunnel token 格式不对（应以 eyJ 开头，在 Zero Trust → Tunnels 里复制）"
-  TOKEN=$t
 fi
 
 # how to re-run this installer, shown in messages: match how it was started (sudo or root, curl or wget)
@@ -111,11 +100,9 @@ svc_logs() {
 
 # ---------- uninstall ----------
 if [ $MODE = uninstall ]; then
-  svc_remove $NAME-tunnel
   svc_remove $NAME
-  if [ -f $CONF_DIR/.cloudflared-installed ]; then rm -f /usr/local/bin/cloudflared; fi
   rm -rf $APP_DIR
-  rm -f $TUNNEL_ENV $CONF_DIR/.cloudflared-installed /var/log/$NAME.log /var/log/$NAME-tunnel.log
+  rm -f /var/log/$NAME.log
   if [ $PURGE = 1 ]; then
     rm -rf $DATA_DIR $CONF_DIR
     if id $SVC_USER >/dev/null 2>&1; then
@@ -145,9 +132,9 @@ envset() { # key value (file is root-only; values never contain '|')
 }
 
 case $(uname -m) in
-  x86_64|amd64) NODE_ARCH=x64; CF_ARCH=amd64 ;;
-  aarch64|arm64) NODE_ARCH=arm64; CF_ARCH=arm64 ;;
-  armv7l|armv7*) NODE_ARCH=armv7l; CF_ARCH=arm ;;
+  x86_64|amd64) NODE_ARCH=x64 ;;
+  aarch64|arm64) NODE_ARCH=arm64 ;;
+  armv7l|armv7*) NODE_ARCH=armv7l ;;
   *) die "不支持的 CPU 架构：$(uname -m)" ;;
 esac
 
@@ -246,7 +233,7 @@ if [ ! -f "$ENV_FILE" ]; then
 #   systemd: systemctl restart $NAME    OpenRC: rc-service $NAME restart
 # 创建空间时需要的服务器密码
 PASSWORD=$pw
-# 只监听本机，由 cloudflared 转发
+# 只监听本机，由你的隧道 / 反代转发到这里
 HOST=127.0.0.1
 PORT=${PORT_ARG:-8090}
 DATA_DIR=$DATA_DIR
@@ -352,33 +339,6 @@ until http_ok "http://127.0.0.1:$PORT/healthz"; do
 done
 log "CopyAnywhere $BUILD 已运行：http://127.0.0.1:$PORT（仅本机可访问）"
 
-# ---------- cloudflared (optional) ----------
-if [ -n "$TOKEN" ]; then
-  umask 077
-  printf 'TUNNEL_TOKEN=%s\n' "$TOKEN" > "$TUNNEL_ENV"
-  umask 022
-fi
-if [ -f "$TUNNEL_ENV" ]; then
-  CF=$(command -v cloudflared || true)
-  if [ -z "$CF" ]; then
-    log "下载 cloudflared（$CF_ARCH）…"
-    fetch "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH" "$WORK/cloudflared" \
-      || die "下载 cloudflared 失败（需要能访问 github.com）"
-    chmod 755 "$WORK/cloudflared"
-    "$WORK/cloudflared" --version >/dev/null 2>&1 || die "下载的 cloudflared 无法运行"
-    mv -f "$WORK/cloudflared" /usr/local/bin/cloudflared
-    touch $CONF_DIR/.cloudflared-installed
-    CF=/usr/local/bin/cloudflared
-  fi
-  if [ $INIT = systemd ]; then
-    write_systemd $NAME-tunnel "CopyAnywhere Cloudflare Tunnel" "$CF --no-autoupdate tunnel run" "$TUNNEL_ENV"
-  else
-    write_openrc $NAME-tunnel "CopyAnywhere Cloudflare Tunnel" "$CF" "--no-autoupdate tunnel run" "$TUNNEL_ENV"
-  fi
-  svc_start $NAME-tunnel
-  log "cloudflared 已启动（$("$CF" --version 2>/dev/null | head -n 1)）"
-fi
-
 # ---------- summary ----------
 if [ $INIT = systemd ]; then
   st="systemctl status $NAME"; lg="journalctl -u $NAME -f"; rs="systemctl restart $NAME"
@@ -386,18 +346,11 @@ else
   st="rc-service $NAME status"; lg="tail -f /var/log/$NAME.log"; rs="rc-service $NAME restart"
 fi
 echo
-if [ -f "$TUNNEL_ENV" ]; then
-  echo "在 Cloudflare Zero Trust → Networks → Tunnels → 你的隧道 → Public Hostname 添加域名，"
-  echo "    Service 选 HTTP，URL 填：127.0.0.1:$PORT"
-else
-  echo "下一步：接入 cloudflared（Service 填 http://127.0.0.1:$PORT）"
-  echo "    · VPS 上已有 cloudflared：在它的隧道里加一个 Public Hostname 即可"
-  echo "    · 还没有：Zero Trust → Networks → Tunnels 新建隧道，复制 token，然后运行"
-  echo "        $RUN --token <TOKEN>"
-fi
+echo "服务只监听本机 http://127.0.0.1:$PORT ，把你的域名（隧道 / 反代）指向这个地址即可。"
 echo
-log "完成。打开 https://<你的域名> ，输入服务器密码创建空间，再用手机扫码添加设备。"
+log "完成。浏览器打开 https://<你的域名> ，输入下面的服务器密码创建空间，其他设备扫码加入（不用密码）。"
 echo "    服务器密码：$(envget PASSWORD)"
+echo "                （只在创建空间时输入一次；忘了可以看：grep PASSWORD $ENV_FILE）"
 echo "    存储上限：  $(envget MAX_TOTAL_MB) MB（全部空间合计，满了自动删最旧的）"
 echo "    配置文件：  $ENV_FILE（改完 $rs）"
 echo "    状态 / 日志：$st  /  $lg"
@@ -410,7 +363,6 @@ usage() {
 CopyAnywhere 安装 / 更新 / 卸载
 
   curl -fsSL https://raw.githubusercontent.com/chilin11/copyanywhere/main/install.sh | sudo sh
-  … | sudo sh -s -- --token <TOKEN>   同时安装 cloudflared 并接入 Tunnel
   … | sudo sh -s -- --port <PORT>     本机端口（默认 8090）
   … | sudo sh -s -- --uninstall       卸载（保留数据；加 --purge 一起删除）
 USAGE
