@@ -5,10 +5,13 @@
   "type": "module",
   "private": true,
   "license": "MIT",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "PASSWORD=dev DATA_DIR=./data node --watch server.js",
-    "test": "node --test test/"
+    "test": "node --test test/*.test.mjs",
+    "bundle": "sh scripts/bundle.sh"
   }
 }

@@ -7,29 +7,43 @@
 - **大文件**：8MB 分块加密、3 路并行上传，失败自动重试，下载时边收边解密。单次请求不超过 17MB，所以经过 Cloudflare（免费版 100MB 上限）也能传几 GB 的文件。
 - **总容量 5GB**：所有空间合计不超过 `MAX_TOTAL_MB`，满了自动删除最旧的内容；同时检查磁盘剩余空间。
 - **用完即焚**：默认 24 小时后自动删除；可以手动删除单条、清空，或删除整个空间。
-- **零依赖**：Node 内置模块，一个容器，以非 root 用户运行，根文件系统只读。
+- **零依赖、很轻**：只需要 Node.js，没有 npm 依赖、不需要 Docker。运行时约 75MB 内存，以独立的非 root 用户运行。
 
-## 部署（VPS + cloudflared）
+## 部署（VPS + cloudflared，不需要 Docker）
 
-需要 Docker（含 Compose v2）和一个托管在 Cloudflare 的域名。不需要开放任何入站端口。
+需要一台 Linux VPS（systemd 或 Alpine/OpenRC，x86_64 / arm64 / armv7）和一个托管在 Cloudflare 的域名。不需要开放任何入站端口。
+
+**1. 在电脑上生成单文件安装包**（程序文件都打包在里面，约 400KB）：
 
 ```bash
-git clone <this repo> copyanywhere && cd copyanywhere
-./install.sh
+npm run bundle          # 生成 dist/install.sh
+scp dist/install.sh root@你的VPS:/root/
 ```
 
-脚本会生成 `.env`（包含随机的服务器密码），构建并启动容器，最后打印密码。服务只监听 `127.0.0.1:8090`，HTTPS 交给 cloudflared，按你的情况选一种：
+**2. 在 VPS 上运行：**
 
-| 情况 | 做法 | Public Hostname 的 Service |
-|---|---|---|
-| VPS 上已经装了 cloudflared（systemd） | Zero Trust → Networks → Tunnels → 你的隧道 → Public Hostname → 添加域名 | `http://127.0.0.1:8090` |
-| 用本地配置文件 `config.yml` | 在 `ingress` 里加 `- hostname: drop.example.com` / `service: http://127.0.0.1:8090`，然后重启 cloudflared | 同上 |
-| 还没有 cloudflared | 在 Zero Trust 新建 Tunnel（选 Docker），把 token 填进 `.env` 的 `TUNNEL_TOKEN`，再运行一次 `./install.sh`，会一并启动 cloudflared 容器 | `http://copyanywhere:8080` |
-| cloudflared 跑在另一个 Docker 容器里 | `.env` 设 `BIND_HOST=172.17.0.1`（docker0 网桥地址），重新 `./install.sh` | `http://172.17.0.1:8090` |
+```bash
+sudo sh install.sh                    # 安装 / 更新
+sudo sh install.sh --token eyJ...     # 同时安装 cloudflared 并接入 Tunnel（还没有 cloudflared 时用）
+```
 
-- **更新**：`git pull && ./install.sh`
-- **日志**：`docker compose logs -f`
-- **配置**（`.env`）：`TTL_HOURS` 保存时长、`MAX_TOTAL_MB` 总容量（默认 5120）、`MAX_FILE_MB` 单文件上限（默认等于总容量）、`MAX_ITEMS` 每个空间条数、`MIN_FREE_MB` 磁盘保留空间。改完重新运行 `./install.sh`。
+脚本会：
+- 系统已有 Node.js 20+ 就直接用；没有的话 Alpine 用 apk 装，其他系统从 nodejs.org 下载官方二进制（只装 `node` 一个文件，校验 sha256）到 `/opt/copyanywhere/node`；
+- 创建系统用户 `copyanywhere`，程序在 `/opt/copyanywhere`，数据在 `/var/lib/copyanywhere`，配置在 `/etc/copyanywhere/env`（含随机服务器密码）；
+- 注册 systemd / OpenRC 服务（开机自启、崩溃自动重启、systemd 下带沙箱限制），只监听 `127.0.0.1:8090`；
+- 磁盘不够 5GB 时自动把存储上限调小（给系统留 1GB）。
+
+然后在 Cloudflare **Zero Trust → Networks → Tunnels → 你的隧道 → Public Hostname** 添加域名，Service 选 **HTTP**，URL 填 **`127.0.0.1:8090`**。
+
+- VPS 上已经在跑 cloudflared：不用 `--token`，直接在那个隧道里加 Public Hostname（`config.yml` 模式则在 `ingress` 里加 `service: http://127.0.0.1:8090`）。
+- **更新**：重新 `npm run bundle`，上传覆盖，再运行一次 `sudo sh install.sh`（配置、密码和数据都保留）。
+- **换端口**：`sudo sh install.sh --port 8091`
+- **状态 / 日志**：`systemctl status copyanywhere` / `journalctl -u copyanywhere -f`（Alpine：`rc-service copyanywhere status` / `/var/log/copyanywhere.log`）
+- **配置**（`/etc/copyanywhere/env`）：`TTL_HOURS` 保存时长、`MAX_TOTAL_MB` 总容量（默认 5120）、`MAX_FILE_MB` 单文件上限（默认等于总容量）、`MAX_ITEMS` 每个空间条数、`MIN_FREE_MB` 磁盘保留空间。改完 `systemctl restart copyanywhere`。
+- **卸载**：`sudo sh install.sh --uninstall`（保留数据）；`--uninstall --purge` 连数据、配置一起删。
+
+> 也可以 `git clone` 到 VPS 上，在项目目录里直接 `sudo sh install.sh`，效果相同。
+> 有 Docker 的机器可以用 `./install-docker.sh`（见 `docker-compose.yml`、`.env.example`）。
 
 > 不要在 Cloudflare 上给这个域名开 Rocket Loader / 自动压缩 JS 一类会改写页面的功能，它们会被 CSP 拦下。
 
