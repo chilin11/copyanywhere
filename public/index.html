@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#4f46e5">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="CopyAnywhere">
+  <title>CopyAnywhere</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="bar">
+    <div class="brand"><img src="/icon.svg" alt="" width="26" height="26"><span>CopyAnywhere</span></div>
+    <div class="bar-actions" id="barActions" hidden>
+      <span class="status" id="status" title="连接状态"></span>
+      <button class="ghost" id="btnAdd" type="button">＋ 添加设备</button>
+      <button class="ghost icon" id="btnSettings" type="button" aria-label="设置">⚙</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- first run -->
+    <section id="viewSetup" class="card setup" hidden>
+      <h1>端到端加密的跨设备剪贴板</h1>
+      <p class="muted">文字、图片和文件先在本机加密再上传。服务器只存密文，到期自动删除。</p>
+      <form id="formCreate">
+        <label for="pw">服务器密码 <span class="muted">（只在创建空间时需要）</span></label>
+        <input id="pw" type="password" autocomplete="current-password" required>
+        <button class="primary" type="submit">创建我的空间</button>
+      </form>
+      <p class="muted small">已经在别的设备上创建过？在那台设备上点 <b>＋ 添加设备</b>，用手机扫码，或者把链接复制到这台设备打开。</p>
+      <p class="error" id="setupError" hidden></p>
+    </section>
+
+    <!-- main -->
+    <section id="viewMain" hidden>
+      <div class="card composer" id="composer">
+        <textarea id="text" rows="3" placeholder="输入文字，或直接 Ctrl/⌘+V 粘贴文字、截图、文件…"></textarea>
+        <div class="composer-row">
+          <button class="ghost" id="btnPaste" type="button">📋 粘贴剪贴板</button>
+          <label class="ghost button" for="file">📎 文件 / 照片</label>
+          <input id="file" type="file" multiple hidden>
+          <span class="spacer"></span>
+          <button class="primary" id="btnSend" type="button">发送</button>
+        </div>
+      </div>
+      <div id="feed" class="feed"></div>
+      <p class="empty muted" id="empty">还没有内容。在任一设备上发送，所有设备都会立即收到。</p>
+      <p class="foot muted small" id="foot"></p>
+    </section>
+  </main>
+
+  <div class="drop" id="drop" hidden><div>松开即可加密发送</div></div>
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <dialog id="dlgAdd">
+    <form method="dialog" class="dlg">
+      <h2>添加设备</h2>
+      <p class="muted small">用另一台设备扫码，或者打开下面的链接。<b>拿到这个链接的人都能看到空间里的内容</b>，请只发给自己的设备。</p>
+      <canvas id="qr" width="264" height="264"></canvas>
+      <input id="link" readonly>
+      <div class="row">
+        <button class="ghost" id="btnCopyLink" type="button">复制链接</button>
+        <span class="spacer"></span>
+        <button class="primary" value="close">完成</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgSettings">
+    <form method="dialog" class="dlg">
+      <h2>设置</h2>
+      <label for="devName">本设备名称</label>
+      <input id="devName" maxlength="40">
+      <div class="row">
+        <button class="ghost" id="btnClear" type="button">清空全部内容</button>
+      </div>
+      <div class="row">
+        <button class="ghost danger" id="btnLeave" type="button">在本设备退出</button>
+        <button class="ghost danger" id="btnDestroy" type="button">删除整个空间</button>
+      </div>
+      <p class="muted small">退出：只清掉本设备保存的密钥，其他设备不受影响。<br>删除：服务器上的所有密文立即删除，所有设备都会失效。</p>
+      <div class="row">
+        <span class="spacer"></span>
+        <button class="primary" value="close">完成</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

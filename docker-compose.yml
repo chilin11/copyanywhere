@@ -1,0 +1,27 @@
+# 构建并运行：./install.sh（会生成 .env），或 docker compose up -d --build
+# 只监听本机端口，由 Caddy / cloudflared 反代并提供 HTTPS。
+services:
+  copyanywhere:
+    build: .
+    image: copyanywhere:local
+    container_name: copyanywhere
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      DATA_DIR: /data
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8090}:8080"
+    volumes:
+      - data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  data:

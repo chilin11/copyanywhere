@@ -1,0 +1,9 @@
+.git
+node_modules
+data
+test
+.env
+.env.example
+*.md
+install.sh
+docker-compose.yml
