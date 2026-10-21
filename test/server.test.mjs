@@ -7,13 +7,14 @@ import { start, sweep, config } from '../server.js';
 import * as c from '../public/crypto.js';
 
 const PW = 'test-password-123';
+const MB = 1024 * 1024;
 let server;
 let base;
 let dataDir;
 
 before(async () => {
   dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ca-test-'));
-  server = await start({ port: 0, host: '127.0.0.1', dataDir, password: PW, maxFileBytes: 1024 * 1024, maxSpaceBytes: 3 * 1024 * 1024, maxItems: 5 });
+  server = await start({ port: 0, host: '127.0.0.1', dataDir, password: PW, maxFileBytes: 2 * MB, maxTotalBytes: 3 * MB, maxItems: 5, minFreeBytes: 0 });
   base = `http://127.0.0.1:${server.address().port}`;
 });
 after(async () => {
@@ -28,7 +29,7 @@ const create = (id, pw = PW, ip = '1.1.1.1') => fetch(`${base}/api/spaces`, {
   headers: { Authorization: 'Bearer ' + pw, 'Content-Type': 'application/json', 'X-Forwarded-For': ip },
   body: JSON.stringify({ id }),
 });
-const upload = (id, body, meta = 'bWV0YQ') => fetch(`${base}/api/spaces/${id}/items`, {
+const upload = (id, body, meta = 'bWV0YQ-test-meta-0') => fetch(`${base}/api/spaces/${id}/items`, {
   method: 'POST', headers: { 'X-Meta': meta, 'Content-Type': 'application/octet-stream' }, body,
 });
 
@@ -49,6 +50,56 @@ test('crypto: derive, roundtrip, AAD binding', async () => {
   await assert.rejects(c.decryptBytes(other.key, ct, 'blob:x'));
   const m = await c.encryptMeta(a.key, { k: 'text', n: 'abc' });
   assert.deepEqual(await c.decryptMeta(b.key, m), { k: 'text', n: 'abc' });
+});
+
+const concat = (arrs) => {
+  const out = new Uint8Array(arrs.reduce((a, b) => a + b.length, 0));
+  let o = 0;
+  for (const a of arrs) { out.set(a, o); o += a.length; }
+  return out;
+};
+const streamOf = (arrs, split = 4096) => new ReadableStream({
+  start(ctrl) {
+    const all = concat(arrs);
+    for (let o = 0; o < all.length; o += split) ctrl.enqueue(all.slice(o, o + split));
+    ctrl.close();
+  },
+});
+
+test('crypto: chunked encryption round-trips and rejects reorder, truncation, swap', async () => {
+  const { key } = await c.deriveSpace(c.newSecret());
+  const size = 25_000;
+  const data = new Uint8Array(size).map((_, i) => (i * 7 + 3) & 255);
+  const meta = { size, c: 10_000, n: 'item1' };
+  const count = c.chunkCount(size, meta.c);
+  assert.equal(count, 3);
+  const parts = [];
+  for (let i = 0; i < count; i++) parts.push(await c.encryptChunk(key, new Blob([data]), meta, i));
+  assert.equal(parts.reduce((a, p) => a + p.length, 0), c.cipherSize(size, meta.c));
+
+  const out = [];
+  let seen = 0;
+  await c.decryptStream(key, streamOf(parts, 3333), meta, (p, i) => { assert.equal(i, out.length); out.push(p); }, (n) => { seen = n; });
+  assert.deepEqual(concat(out), data);
+  assert.equal(seen, c.cipherSize(size, meta.c));
+
+  const none = () => {};
+  await assert.rejects(c.decryptStream(key, streamOf([parts[1], parts[0], parts[2]]), meta, none)); // reordered
+  await assert.rejects(c.decryptStream(key, streamOf(parts.slice(0, 2)), meta, none), /truncated/);
+  await assert.rejects(c.decryptStream(key, streamOf(parts.slice(0, 2)), { ...meta, size: 20_000 }, none)); // last flag
+  await assert.rejects(c.decryptStream(key, streamOf(parts), { ...meta, n: 'item2' }, none)); // moved to another item
+  await assert.rejects(c.decryptStream(key, streamOf([...parts, new Uint8Array(5)]), meta, none), /trailing/);
+  const bad = parts.map((p) => p.slice());
+  bad[1][100] ^= 1;
+  await assert.rejects(c.decryptStream(key, streamOf(bad), meta, none)); // tampered
+
+  const empty = { size: 0, c: 10_000, n: 'e' };
+  const ep = await c.encryptChunk(key, new Blob([]), empty, 0);
+  assert.equal(ep.length, c.GCM_OVERHEAD);
+  const eo = [];
+  await c.decryptStream(key, streamOf([ep]), empty, (p) => eo.push(p));
+  assert.equal(eo.length, 1);
+  assert.equal(eo[0].length, 0);
 });
 
 test('static files are served with strict security headers', async () => {
@@ -108,20 +159,24 @@ test('upload, list, download, delete, and live events', async () => {
 
   const list = await (await fetch(`${base}/api/spaces/${id}/items`)).json();
   assert.equal(list.items.length, 1);
-  assert.equal(list.items[0].meta, 'bWV0YQ');
+  assert.equal(list.items[0].meta, 'bWV0YQ-test-meta-0');
 
   const dl = await fetch(`${base}/api/spaces/${id}/items/${item.id}`);
-  assert.equal(dl.headers.get('cache-control'), 'no-store');
+  assert.equal(dl.headers.get('cache-control'), 'no-store, no-transform');
   assert.deepEqual(new Uint8Array(await dl.arrayBuffer()), payload);
 
   assert.equal((await fetch(`${base}/api/spaces/${id}/items/${item.id}`, { method: 'DELETE' })).status, 200);
   assert.equal((await fetch(`${base}/api/spaces/${id}/items/${item.id}`)).status, 404);
 
-  await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 450)); // usage updates are debounced (300 ms)
   ctrl.abort();
   await pump;
-  assert.deepEqual(events.map((e) => e.type), ['add', 'delete']);
-  assert.equal(events[0].item.id, item.id);
+  assert.equal(events[0].type, 'usage'); // sent on connect
+  assert.deepEqual(events.filter((e) => e.type !== 'usage').map((e) => e.type), ['add', 'delete']);
+  assert.equal(events.find((e) => e.type === 'add').item.id, item.id);
+  const last = events.at(-1);
+  assert.equal(last.type, 'usage');
+  assert.equal(last.total, 3 * MB);
 });
 
 test('rejects bad meta, empty and oversize uploads', async () => {
@@ -129,12 +184,14 @@ test('rejects bad meta, empty and oversize uploads', async () => {
   await create(id);
   assert.equal((await upload(id, new Uint8Array(10), 'bad meta!')).status, 400);
   assert.equal((await upload(id, new Uint8Array(0))).status, 400);
-  assert.equal((await upload(id, new Uint8Array(1024 * 1024 + 100))).status, 413);
+  // server answers 413 and closes before reading the body; a large body may surface as a reset instead
+  const over = await upload(id, new Uint8Array(2_300_000)).catch(() => null);
+  if (over) assert.equal(over.status, 413);
   // streamed body without content-length
   const stream = new ReadableStream({
-    start(ctrl) { for (let i = 0; i < 20; i++) ctrl.enqueue(new Uint8Array(64 * 1024)); ctrl.close(); },
+    start(ctrl) { for (let i = 0; i < 40; i++) ctrl.enqueue(new Uint8Array(64 * 1024)); ctrl.close(); },
   });
-  const r = await fetch(`${base}/api/spaces/${id}/items`, { method: 'POST', headers: { 'X-Meta': 'bWV0YQ' }, body: stream, duplex: 'half' })
+  const r = await fetch(`${base}/api/spaces/${id}/items`, { method: 'POST', headers: { 'X-Meta': 'bWV0YQ-test-meta-0' }, body: stream, duplex: 'half' })
     .catch(() => null); // server may close the socket early
   if (r) assert.equal(r.status, 413);
   const list = await (await fetch(`${base}/api/spaces/${id}/items`)).json();
@@ -143,17 +200,110 @@ test('rejects bad meta, empty and oversize uploads', async () => {
   assert.deepEqual(files.filter((f) => f !== 'index.json'), []);
 });
 
-test('quota evicts oldest items (count and bytes)', async () => {
+const META = 'bWV0YQ-test-meta-0';
+const list = async (id) => (await fetch(`${base}/api/spaces/${id}/items`)).json();
+const initUpload = (id, body) => fetch(`${base}/api/spaces/${id}/uploads`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+});
+const partFiles = async (id) => (await fs.readdir(path.join(dataDir, 'spaces', id))).filter((f) => f.endsWith('.part'));
+
+test('per-space item cap, and the global byte cap evicts the oldest items across spaces', async () => {
+  const a = id43();
+  const b = id43();
+  await create(a);
+  await create(b);
+  const ids = [];
+  for (let i = 0; i < 7; i++) ids.push((await (await upload(a, new Uint8Array(1000 + i))).json()).id);
+  assert.deepEqual((await list(a)).items.map((i) => i.id), ids.slice(2));
+
+  const big = [];
+  for (let i = 0; i < 3; i++) big.push((await (await upload(a, new Uint8Array(900_000))).json()).id);
+  const up = await upload(b, new Uint8Array(900_000)); // 3.6 MB > 3 MB total -> evicts from space a
+  assert.equal(up.status, 201);
+  assert.deepEqual((await list(a)).items.map((i) => i.id), big.slice(1));
+  const lb = await list(b);
+  assert.equal(lb.items.length, 1);
+  assert.deepEqual(lb.usage, { used: 2_700_000, total: 3 * MB });
+  assert.ok((await (await fetch(`${base}/api/config`)).json()).maxTotalBytes === 3 * MB);
+});
+
+test('chunked upload: validation, out of order, duplicate, bad length, incomplete, complete', async () => {
   const id = id43();
   await create(id);
-  const ids = [];
-  for (let i = 0; i < 7; i++) ids.push((await (await upload(id, new Uint8Array(1000 + i))).json()).id);
-  let list = (await (await fetch(`${base}/api/spaces/${id}/items`)).json()).items;
-  assert.deepEqual(list.map((i) => i.id), ids.slice(2));
-  for (let i = 0; i < 4; i++) assert.equal((await upload(id, new Uint8Array(1000 * 1000))).status, 201);
-  list = (await (await fetch(`${base}/api/spaces/${id}/items`)).json()).items;
-  assert.ok(list.reduce((a, i) => a + i.size, 0) <= 3 * 1024 * 1024);
-  assert.equal(list.length, 3);
+  const size = 250_000;
+  const chunk = 100_000;
+  const data = new Uint8Array(size).map((_, i) => (i * 13 + 5) & 255);
+  const part = (i) => data.slice(i * chunk, Math.min(size, (i + 1) * chunk));
+
+  assert.equal((await initUpload(id, { size, chunk, meta: 'bad meta!' })).status, 400);
+  assert.equal((await initUpload(id, { size: 0, chunk, meta: META })).status, 400);
+  assert.equal((await initUpload(id, { size, chunk: 10, meta: META })).status, 400);
+  assert.equal((await initUpload(id, { size, chunk: 64 * MB, meta: META })).status, 400);
+  assert.equal((await initUpload(id, { size: 2_700_000, chunk, meta: META })).status, 413); // > MAX_FILE
+
+  const used0 = (await list(id)).usage.used;
+  const r = await initUpload(id, { size, chunk, meta: META });
+  assert.equal(r.status, 201);
+  const { uploadId, count } = await r.json();
+  assert.equal(count, 3);
+  assert.equal((await list(id)).usage.used, used0 + size); // reserved up front
+
+  const url = (x) => `${base}/api/spaces/${id}/uploads/${uploadId}/${x}`;
+  const put = (i, body) => fetch(url(i), { method: 'PUT', body });
+  assert.equal((await put(2, part(2))).status, 200); // last chunk first
+  assert.equal((await put(0, part(1).slice(0, 10))).status, 400); // wrong length
+  assert.equal((await put(3, part(2))).status, 400); // index out of range
+  let done = await fetch(url('complete'), { method: 'POST' });
+  assert.equal(done.status, 409);
+  assert.deepEqual((await done.json()).missing, [0, 1]);
+  assert.equal((await put(1, part(1))).status, 200);
+  assert.equal((await put(0, part(0))).status, 200);
+  const dup = await put(1, part(1));
+  assert.equal(dup.status, 200);
+  assert.equal((await dup.json()).duplicate, true);
+  assert.equal((await list(id)).items.length, 0); // not visible until complete
+
+  done = await fetch(url('complete'), { method: 'POST' });
+  assert.equal(done.status, 201);
+  const item = await done.json();
+  assert.equal(item.size, size);
+  assert.equal(item.meta, META);
+  const l = await list(id);
+  assert.equal(l.items.length, 1);
+  assert.equal(l.usage.used, used0 + size); // reservation became the stored item
+  const dl = await fetch(`${base}/api/spaces/${id}/items/${item.id}`);
+  assert.deepEqual(new Uint8Array(await dl.arrayBuffer()), data);
+  assert.equal((await fetch(url('complete'), { method: 'POST' })).status, 404);
+  assert.equal((await put(0, part(0))).status, 404);
+  assert.deepEqual(await partFiles(id), []);
+});
+
+test('reservations: uploads in flight cannot overcommit; abort and space deletion free them', async () => {
+  const id = id43();
+  const other = id43();
+  await create(id);
+  await create(other);
+  const r = await initUpload(id, { size: 2 * MB, chunk: MB, meta: META }); // evicts old items to fit
+  assert.equal(r.status, 201);
+  const { uploadId } = await r.json();
+  assert.ok((await list(id)).usage.used <= 3 * MB);
+  const keep = (await list(other)).usage.used - 2 * MB; // whatever is still stored
+
+  // 2 MB reserved + 1.2 MB can never fit in 3 MB: refuse without evicting anything
+  assert.equal((await upload(other, new Uint8Array(1_200_000))).status, 507);
+  assert.equal((await initUpload(other, { size: 1_200_000, chunk: MB, meta: META })).status, 507);
+  assert.equal((await list(other)).usage.used, keep + 2 * MB);
+
+  assert.equal((await fetch(`${base}/api/spaces/${id}/uploads/${uploadId}`, { method: 'DELETE' })).status, 200);
+  assert.deepEqual(await partFiles(id), []);
+  assert.equal((await list(other)).usage.used, keep);
+  assert.equal((await upload(other, new Uint8Array(1_200_000))).status, 201);
+
+  // deleting a space drops its pending uploads too
+  await initUpload(id, { size: MB, chunk: MB, meta: META });
+  const before = (await list(other)).usage.used;
+  assert.equal((await fetch(`${base}/api/spaces/${id}`, { method: 'DELETE' })).status, 200);
+  assert.equal((await list(other)).usage.used, before - MB);
 });
 
 test('items persist to disk, expired items are swept, space deletion', async () => {

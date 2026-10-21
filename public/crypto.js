@@ -56,3 +56,57 @@ export async function encryptMeta(key, obj) {
 export async function decryptMeta(key, str) {
   return JSON.parse(dec.decode(await decryptBytes(key, unb64u(str), 'meta')));
 }
+
+// ---------- chunked content ----------
+// Plaintext is split into `c`-byte chunks; each chunk is sealed separately as iv(12) || ciphertext || tag(16).
+// AAD = "blob:<n>:<index>:<last>" so chunks cannot be reordered, dropped, truncated or moved between items.
+export const GCM_OVERHEAD = 28;
+export const DEFAULT_CHUNK = 8 * 1024 * 1024;
+export const chunkCount = (size, c) => Math.max(1, Math.ceil(size / c));
+export const cipherSize = (size, c) => size + chunkCount(size, c) * GCM_OVERHEAD;
+export const chunkRole = (n, i, count) => `blob:${n}:${i}:${i === count - 1 ? 1 : 0}`;
+
+/** Encrypt chunk `i` of `blob` (a Blob/File) described by meta {size, c, n}. */
+export async function encryptChunk(key, blob, meta, i) {
+  const count = chunkCount(meta.size, meta.c);
+  const part = await blob.slice(i * meta.c, Math.min(meta.size, (i + 1) * meta.c)).arrayBuffer();
+  return encryptBytes(key, part, chunkRole(meta.n, i, count));
+}
+
+/**
+ * Decrypt a ciphertext byte stream chunk by chunk.
+ * @param {ReadableStream<Uint8Array>} stream
+ * @param {(plain: Uint8Array, i: number) => Promise<void>|void} onChunk
+ * @param {(received: number) => void} [onBytes]
+ */
+export async function decryptStream(key, stream, meta, onChunk, onBytes) {
+  const count = chunkCount(meta.size, meta.c);
+  const full = meta.c + GCM_OVERHEAD;
+  const expectLen = (i) => (i < count - 1 ? full : meta.size - meta.c * (count - 1) + GCM_OVERHEAD);
+  const reader = stream.getReader();
+  let i = 0;
+  let buf = new Uint8Array(expectLen(0));
+  let off = 0;
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.length;
+    onBytes?.(received);
+    let pos = 0;
+    while (pos < value.length) {
+      if (i >= count) throw new Error('unexpected trailing data');
+      const take = Math.min(buf.length - off, value.length - pos);
+      buf.set(value.subarray(pos, pos + take), off);
+      off += take;
+      pos += take;
+      if (off === buf.length) {
+        await onChunk(new Uint8Array(await decryptBytes(key, buf, chunkRole(meta.n, i, count))), i);
+        i++;
+        off = 0;
+        if (i < count) buf = new Uint8Array(expectLen(i));
+      }
+    }
+  }
+  if (i !== count) throw new Error('truncated content');
+}
