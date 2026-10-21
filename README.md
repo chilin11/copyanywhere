@@ -19,6 +19,8 @@
 curl -fsSL https://raw.githubusercontent.com/chilin11/copyanywhere/main/install.sh | sudo sh
 ```
 
+> 已经是 root 登录就去掉 `sudo`；系统没有 curl 就把 `curl -fsSL` 换成 `wget -qO-`。
+
 还没有 cloudflared 的话，在 Zero Trust → Networks → Tunnels 新建隧道，复制 token，用这条命令顺带装上：
 
 ```bash

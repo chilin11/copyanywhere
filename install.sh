@@ -60,9 +60,12 @@ if [ -n "$TOKEN" ]; then
   TOKEN=$t
 fi
 
+# how to re-run this installer, shown in messages: match how it was started (sudo or root, curl or wget)
+SUDO=; [ -n "${SUDO_USER:-}" ] && SUDO="sudo "
+if command -v curl >/dev/null 2>&1; then GET="curl -fsSL"; else GET="wget -qO-"; fi
 case ${0##*/} in
-  sh|bash|dash|ash|busybox|-*) RUN="curl -fsSL https://raw.githubusercontent.com/$REPO/$REF/install.sh | sudo sh -s --" ;;
-  *) RUN="sudo sh $0" ;;
+  sh|bash|dash|ash|busybox|-*) RUN="$GET https://raw.githubusercontent.com/$REPO/$REF/install.sh | ${SUDO}sh -s --" ;;
+  *) RUN="${SUDO}sh $0" ;;
 esac
 
 [ "$(uname -s)" = Linux ] || die "只支持 Linux"
