@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="referrer" content="no-referrer">
-  <meta name="theme-color" content="#0d0f14" media="(prefers-color-scheme: dark)">
-  <meta name="theme-color" content="#f5f6fa" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b0d12" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f4f5f9" media="(prefers-color-scheme: light)">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="CopyAnywhere">
   <title>CopyAnywhere</title>
@@ -17,11 +17,11 @@
 </head>
 <body>
   <header class="bar">
-    <div class="brand"><img src="/icon.svg" alt="" width="28" height="28"><span>CopyAnywhere</span></div>
+    <div class="brand"><img src="/icon.svg" alt="" width="30" height="30"><span>CopyAnywhere</span></div>
     <div class="bar-actions" id="barActions" hidden>
       <span class="pill" id="status"><i></i><span id="statusText">连接中</span></span>
-      <button class="btn ghost" id="btnAdd" type="button"><span aria-hidden="true">＋</span><span class="hide-sm">添加设备</span></button>
-      <button class="btn ghost icon" id="btnSettings" type="button" aria-label="设置">⚙</button>
+      <button class="btn ghost" id="btnAdd" type="button"><i data-icon="plus"></i><span class="hide-sm">添加设备</span></button>
+      <button class="btn ghost icon" id="btnSettings" type="button" aria-label="设置"><i data-icon="settings"></i></button>
     </div>
   </header>
 
@@ -29,17 +29,22 @@
     <!-- first run -->
     <section id="viewSetup" class="setup" hidden>
       <div class="hero">
-        <img src="/icon.svg" alt="" width="64" height="64">
-        <h1>随处复制，随处粘贴</h1>
-        <p class="muted">手机、Mac、Windows 之间互传文字、截图和文件，换个网络也能用。<br>内容在本机加密后才上传，服务器只存密文，到期自动删除。</p>
+        <div class="hero-icon"><img src="/icon.svg" alt="" width="68" height="68"></div>
+        <h1>随处复制，<span class="grad">随处粘贴</span></h1>
+        <p class="muted">手机、Mac、Windows 之间互传文字、截图和文件，不在同一个网络也能用。</p>
       </div>
-      <form id="formCreate" class="card">
+      <form id="formCreate" class="card form">
         <label for="pw">服务器密码</label>
-        <input id="pw" type="password" autocomplete="current-password" placeholder="部署时生成的 PASSWORD" required>
+        <input id="pw" type="password" autocomplete="current-password" placeholder="安装时生成的 PASSWORD" required>
         <button class="btn primary block" type="submit">创建我的空间</button>
         <p class="error" id="setupError" hidden></p>
       </form>
-      <p class="muted small center">已经在别的设备上创建过？在那台设备上点 <b>＋ 添加设备</b>，扫码或打开链接加入。</p>
+      <ul class="features">
+        <li><span class="f-ic f-text"><i data-icon="lock"></i></span><div><b>端到端加密</b><span class="muted">在本机加密后才上传，服务器只存密文</span></div></li>
+        <li><span class="f-ic f-image"><i data-icon="zap"></i></span><div><b>实时同步</b><span class="muted">一台设备发送，其他设备立刻收到</span></div></li>
+        <li><span class="f-ic f-file"><i data-icon="clock"></i></span><div><b>用完即焚</b><span class="muted">到期自动删除，也可随时清空</span></div></li>
+      </ul>
+      <p class="muted small center">已经在别的设备上创建过？在那台设备上点右上角 <b>＋ 添加设备</b>，扫码或打开链接加入。</p>
     </section>
 
     <!-- main -->
@@ -47,12 +52,11 @@
       <div class="card composer" id="composer">
         <textarea id="text" rows="2" placeholder="输入文字…"></textarea>
         <div class="composer-row">
-          <button class="btn ghost" id="btnPaste" type="button" title="读取剪贴板并发送">📋 <span>粘贴</span></button>
-          <label class="btn ghost" for="file" title="选择文件或照片">📎 <span>文件</span></label>
+          <button class="tool" id="btnPaste" type="button" title="读取剪贴板并发送"><i data-icon="clipboard"></i><span>粘贴</span></button>
+          <label class="tool" for="file" title="选择文件或照片"><i data-icon="paperclip"></i><span>文件 / 照片</span></label>
           <input id="file" type="file" multiple hidden>
           <span class="hint muted" id="hint"></span>
-          <span class="spacer"></span>
-          <button class="btn primary" id="btnSend" type="button">发送</button>
+          <button class="btn primary send" id="btnSend" type="button"><span>发送</span><i data-icon="send"></i></button>
         </div>
       </div>
 
@@ -60,12 +64,13 @@
 
       <div class="toolbar">
         <div class="chips" id="chips" role="tablist">
-          <button class="chip active" data-filter="all" type="button">全部 <b id="cntAll">0</b></button>
-          <button class="chip" data-filter="text" type="button">文字 <b id="cntText">0</b></button>
-          <button class="chip" data-filter="image" type="button">图片 <b id="cntImage">0</b></button>
-          <button class="chip" data-filter="file" type="button">文件 <b id="cntFile">0</b></button>
+          <button class="chip active" data-filter="all" type="button"><i data-icon="grid"></i>全部 <b id="cntAll">0</b></button>
+          <button class="chip" data-filter="text" type="button"><i data-icon="text"></i>文字 <b id="cntText">0</b></button>
+          <button class="chip" data-filter="image" type="button"><i data-icon="image"></i>图片 <b id="cntImage">0</b></button>
+          <button class="chip" data-filter="file" type="button"><i data-icon="file"></i>文件 <b id="cntFile">0</b></button>
         </div>
         <div class="meter" id="meter" title="服务器存储用量（所有内容合计）">
+          <i data-icon="database"></i>
           <span id="meterText">— / —</span>
           <div class="meter-bar"><div id="meterFill"></div></div>
         </div>
@@ -73,25 +78,34 @@
 
       <div id="feed" class="feed" data-filter="all"></div>
       <div class="empty" id="empty">
-        <div class="empty-icon">⇄</div>
-        <p>还没有内容</p>
-        <p class="muted small">在任何一台设备上粘贴或发送，其他设备会立刻收到。</p>
+        <div class="empty-art" aria-hidden="true">
+          <span class="ea ea-text"><i data-icon="text"></i></span>
+          <span class="ea ea-image"><i data-icon="image"></i></span>
+          <span class="ea ea-file"><i data-icon="file"></i></span>
+        </div>
+        <p class="empty-title">还没有内容</p>
+        <p class="muted small">在任意一台设备上发送，其他设备会立刻收到</p>
+        <div class="empty-tips">
+          <span><i data-icon="keyboard"></i>⌘ / Ctrl + V 直接发送</span>
+          <span><i data-icon="upload"></i>把文件拖进来</span>
+          <span><i data-icon="plus"></i>右上角添加设备</span>
+        </div>
       </div>
-      <p class="foot muted small" id="foot"></p>
+      <p class="foot muted small"><i data-icon="lock"></i><span id="foot"></span></p>
     </section>
   </main>
 
-  <div class="drop" id="drop" hidden><div>松开即可加密发送</div></div>
+  <div class="drop" id="drop" hidden><div><i data-icon="upload"></i>松开即可加密发送</div></div>
   <div class="toast" id="toast" role="status" hidden></div>
 
   <dialog id="dlgAdd">
     <form method="dialog" class="dlg">
       <h2>添加设备</h2>
       <p class="muted small">用另一台设备扫码，或打开下面的链接。<b>这个链接就是钥匙</b>，拿到它就能看到空间里的全部内容，只发给自己的设备。</p>
-      <canvas id="qr" width="264" height="264"></canvas>
+      <div class="qr-wrap"><canvas id="qr" width="264" height="264"></canvas></div>
       <input id="link" readonly>
       <div class="row">
-        <button class="btn ghost" id="btnCopyLink" type="button">复制链接</button>
+        <button class="btn ghost" id="btnCopyLink" type="button"><i data-icon="copy"></i><span class="lbl">复制链接</span></button>
         <span class="spacer"></span>
         <button class="btn primary" value="close">完成</button>
       </div>
@@ -101,16 +115,19 @@
   <dialog id="dlgSettings">
     <form method="dialog" class="dlg">
       <h2>设置</h2>
-      <label for="devName">本设备名称</label>
-      <input id="devName" maxlength="40">
-      <label class="check"><input type="checkbox" id="autoCopy"> 收到其他设备的文字时自动复制 <span class="muted small">（页面需在前台）</span></label>
-      <hr>
-      <div class="row">
-        <button class="btn ghost" id="btnClear" type="button">清空全部内容</button>
-        <button class="btn ghost danger" id="btnLeave" type="button">本设备退出</button>
-        <button class="btn ghost danger" id="btnDestroy" type="button">删除整个空间</button>
+      <div class="field">
+        <label for="devName">本设备名称</label>
+        <input id="devName" maxlength="40">
       </div>
-      <p class="muted small">退出只清除本设备上的密钥，其他设备不受影响。删除会立即清空服务器上的全部密文，所有设备都会失效。</p>
+      <label class="check"><input type="checkbox" id="autoCopy"><span>收到其他设备的文字时自动复制 <span class="muted small">（页面需在前台）</span></span></label>
+      <div class="danger-zone">
+        <div class="row">
+          <button class="btn ghost" id="btnClear" type="button">清空全部内容</button>
+          <button class="btn ghost danger" id="btnLeave" type="button">本设备退出</button>
+          <button class="btn ghost danger" id="btnDestroy" type="button">删除整个空间</button>
+        </div>
+        <p class="muted small">退出只清除本设备上的密钥，其他设备不受影响。删除会立即清空服务器上的全部密文，所有设备都会失效。</p>
+      </div>
       <div class="row">
         <span class="spacer"></span>
         <button class="btn primary" value="close">完成</button>
@@ -119,7 +136,7 @@
   </dialog>
 
   <dialog id="dlgView" class="viewer">
-    <form method="dialog"><button class="viewer-close" aria-label="关闭">✕</button></form>
+    <form method="dialog"><button class="viewer-close" aria-label="关闭"><i data-icon="x"></i></button></form>
     <img id="viewImg" alt="">
   </dialog>
 </body>

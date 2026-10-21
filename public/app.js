@@ -37,6 +37,82 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
+// stroke icons (lucide-style), inlined so the strict CSP needs no extra requests
+const ICONS = {
+  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+  trash: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+  x: '<path d="M18 6 6 18M6 6l12 12"/>',
+  clipboard: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>',
+  paperclip: '<path d="m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l8.6-8.6a4 4 0 1 1 5.7 5.7l-8.6 8.6a2 2 0 0 1-2.8-2.8l8.5-8.5"/>',
+  send: '<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  settings: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
+  play: '<path d="M7 4v16l13-8z"/>',
+  text: '<path d="M4 7V5h16v2"/><path d="M9 19h6"/><path d="M12 5v14"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>',
+  file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
+  grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+  share: '<path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="m16 6-4-4-4 4"/><path d="M12 2v13"/>',
+  monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
+  phone: '<rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18h2"/>',
+  chevron: '<path d="m6 9 6 6 6-6"/>',
+  lock: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  zap: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
+  keyboard: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M7 15h10"/>',
+  database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+};
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function icon(name, cls = 'ic') {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('class', cls);
+  svg.setAttribute('aria-hidden', 'true');
+  svg.innerHTML = ICONS[name] || ''; // constant markup, never user data
+  return svg;
+}
+const hydrateIcons = (root = document) => {
+  for (const el of root.querySelectorAll('i[data-icon]')) el.replaceWith(icon(el.dataset.icon, el.className || 'ic'));
+};
+
+/** Button with an icon and a text label; setLabel()/flash() only touch the label. */
+function iconBtn(label, name, onclick, cls = 'btn soft sm') {
+  return h('button', { class: cls, type: 'button', onclick }, icon(name), h('span', { class: 'lbl' }, label));
+}
+const setLabel = (btn, text) => { const l = btn.querySelector('.lbl'); if (l) l.textContent = text; else btn.textContent = text; };
+function flash(btn, text = '已复制') {
+  if (!btn) return;
+  const l = btn.querySelector('.lbl');
+  const svg = btn.querySelector('svg');
+  const old = { text: l?.textContent, svg };
+  clearTimeout(btn._flash);
+  if (l) l.textContent = text;
+  if (svg) svg.replaceWith(icon('check'));
+  btn.classList.add('done');
+  btn._flash = setTimeout(() => {
+    if (l) l.textContent = old.text;
+    btn.querySelector('svg')?.replaceWith(old.svg);
+    btn.classList.remove('done');
+  }, 1600);
+}
+
+const KIND = {
+  text: { label: '文字', icon: 'text' },
+  image: { label: '图片', icon: 'image' },
+  file: { label: '文件', icon: 'file' },
+};
+const hue = (s) => { let x = 7; for (const c of String(s)) x = (x * 31 + c.codePointAt(0)) >>> 0; return x % 360; };
+const isPhone = (name) => /iPhone|iPad|Android|手机|平板|phone|pad/i.test(name || '');
+function avatar(meta) {
+  const el = h('span', { class: 'avatar', title: meta.dev || '' }, icon(isPhone(meta.dev) ? 'phone' : 'monitor'));
+  el.style.setProperty('--hue', hue(meta.did || meta.dev || '?'));
+  return el;
+}
+
 let toastTimer;
 function toast(msg, ms = 2600) {
   const t = $('toast');
@@ -96,19 +172,24 @@ function kindOf(meta) {
   if (/^image\//.test(meta.type || '')) return 'image';
   return 'file';
 }
-function fileIcon(meta) {
+function fileType(meta) {
   const t = meta.type || '';
-  const ext = (meta.name || '').split('.').pop().toLowerCase();
-  if (t.startsWith('image/')) return '🖼';
-  if (t.startsWith('video/')) return '🎬';
-  if (t.startsWith('audio/')) return '🎵';
-  if (t === 'application/pdf' || ext === 'pdf') return '📕';
-  if (/^(zip|rar|7z|gz|tgz|bz2|xz|tar|dmg|iso)$/.test(ext)) return '📦';
-  if (/^(xls|xlsx|csv|numbers)$/.test(ext)) return '📊';
-  if (/^(doc|docx|pages|txt|md|rtf)$/.test(ext)) return '📝';
-  if (/^(ppt|pptx|key)$/.test(ext)) return '📽';
-  if (/^(apk|exe|msi|pkg|app|ipa)$/.test(ext)) return '⚙';
-  return '📄';
+  const ext = ((meta.name || '').match(/\.([a-z0-9]{1,8})$/i)?.[1] || '').toLowerCase();
+  const rules = [
+    [t.startsWith('video/') || /^(mp4|mov|mkv|avi|webm|m4v)$/.test(ext), 'violet', '视频'],
+    [t.startsWith('audio/') || /^(mp3|m4a|wav|flac|aac|ogg|opus)$/.test(ext), 'pink', '音频'],
+    [t === 'application/pdf' || ext === 'pdf', 'red', 'PDF 文档'],
+    [/^(zip|rar|7z|gz|tgz|bz2|xz|tar|zst)$/.test(ext), 'amber', '压缩包'],
+    [/^(xls|xlsx|csv|tsv|numbers)$/.test(ext), 'green', '表格'],
+    [/^(doc|docx|pages|rtf|odt)$/.test(ext), 'blue', '文档'],
+    [/^(ppt|pptx|key|odp)$/.test(ext), 'orange', '演示文稿'],
+    [/^(apk|exe|msi|dmg|pkg|ipa|deb|rpm|appimage|iso)$/.test(ext), 'lime', '安装包'],
+    [t.startsWith('image/'), 'teal', '图片'],
+    [t.startsWith('text/') || /^(txt|md|log|json|ya?ml|xml|html?|css|m?js|ts|py|go|rs|java|c|cpp|h|sh|sql)$/.test(ext), 'slate', '文本 / 代码'],
+  ];
+  const hit = rules.find((r) => r[0]);
+  const label = (ext || t.split('/')[1] || 'file').replace(/[^a-z0-9]/gi, '').slice(0, 4).toUpperCase() || 'FILE';
+  return { tone: hit ? hit[1] : 'gray', desc: hit ? hit[2] : '文件', label };
 }
 
 async function api(path, opts = {}) {
@@ -299,36 +380,50 @@ function getBlob(entry, opts = {}) {
 const isUrl = (t) => /^https?:\/\/\S+$/i.test(t.trim());
 
 function renderEntry(entry) {
-  const { raw, meta } = entry;
+  const { raw, meta, kind } = entry;
   const actions = h('div', { class: 'item-actions' });
   const body = h('div', { class: 'item-body' });
   const prog = h('div', { class: 'progress thin', hidden: true }, h('div', { class: 'progress-bar' }));
-  const el = h('article', { class: 'item', 'data-ts': raw.ts, 'data-kind': entry.kind },
+  const info = h('span', { class: 'info' });
+  const el = h('article', { class: `item item-${kind}`, 'data-ts': raw.ts, 'data-kind': kind },
     h('div', { class: 'item-head' },
-      h('span', { class: 'dev' }, meta.dev || '未知设备'),
-      entry.mine ? h('span', { class: 'tag' }, '本机') : null,
-      h('span', { class: 'time muted', 'data-ts': raw.ts, title: fmtLeft(raw.ts) }, fmtTime(raw.ts)),
-      meta.k === 'file' ? h('span', { class: 'muted' }, fmtSize(meta.size)) : null,
-      h('span', { class: 'spacer' }),
-      h('button', { class: 'icon-btn', type: 'button', title: '删除', 'aria-label': '删除', onclick: () => removeEntry(entry) }, '✕')),
+      avatar(meta),
+      h('div', { class: 'who' },
+        h('div', { class: 'who-line' },
+          h('span', { class: 'dev' }, meta.dev || '未知设备'),
+          entry.mine ? h('span', { class: 'tag' }, '本机') : null),
+        h('div', { class: 'when' },
+          h('span', { class: 'time', 'data-ts': raw.ts, title: fmtLeft(raw.ts) }, fmtTime(raw.ts)), info)),
+      h('span', { class: 'kind-badge' }, icon(KIND[kind].icon), h('span', {}, KIND[kind].label)),
+      h('button', { class: 'icon-btn', type: 'button', title: '删除', 'aria-label': '删除', onclick: () => removeEntry(entry) }, icon('trash'))),
     body, prog, actions);
   entry.prog = prog;
+  const setInfo = (t) => { info.textContent = t ? ' · ' + t : ''; };
 
-  if (meta.k === 'text') {
+  if (kind === 'text') {
     const pre = h('pre', { class: 'text' }, '解密中…');
-    body.append(pre);
-    const copyBtn = h('button', { class: 'btn soft sm', type: 'button', disabled: true, onclick: () => copyText(entry.text) }, '复制');
+    body.append(h('div', { class: 'bubble' }, pre));
+    const copyBtn = iconBtn('复制', 'copy', () => copyText(entry.text, copyBtn), 'btn primary sm');
+    copyBtn.disabled = true;
     actions.append(copyBtn);
     getBlob(entry).then((b) => b.text()).then((t) => {
       entry.text = t;
       pre.textContent = t;
       copyBtn.disabled = false;
-      if (isUrl(t)) actions.append(h('a', { class: 'btn ghost sm', href: t.trim(), target: '_blank', rel: 'noopener noreferrer' }, '打开链接'));
+      const chars = [...t].length;
+      setInfo(chars + ' 字');
+      if (isUrl(t)) {
+        pre.classList.add('is-link');
+        actions.append(h('a', { class: 'btn ghost sm', href: t.trim(), target: '_blank', rel: 'noopener noreferrer' }, icon('link'), h('span', { class: 'lbl' }, '打开链接')));
+      }
       requestAnimationFrame(() => {
         if (pre.scrollHeight > pre.clientHeight + 4) {
           pre.classList.add('clamped');
-          const more = h('button', { class: 'btn ghost sm', type: 'button' }, '展开');
-          more.addEventListener('click', () => { more.textContent = pre.classList.toggle('clamped') ? '展开' : '收起'; });
+          const more = iconBtn('展开全文', 'chevron', () => {
+            const clamped = pre.classList.toggle('clamped');
+            setLabel(more, clamped ? '展开全文' : '收起');
+            more.classList.toggle('flip', !clamped);
+          }, 'btn ghost sm');
           actions.append(more);
         }
       });
@@ -339,41 +434,52 @@ function renderEntry(entry) {
     return el;
   }
 
-  if (entry.kind === 'image' && meta.size <= PREVIEW_MAX) {
-    const img = h('img', { class: 'preview', alt: meta.name || '图片', title: '点击查看大图' });
+  const dl = iconBtn('下载', 'download', null, kind === 'image' ? 'btn ghost sm' : 'btn primary sm dl');
+  dl.addEventListener('click', () => download(entry, dl));
+
+  if (kind === 'image' && meta.size <= PREVIEW_MAX) {
+    const img = h('img', { class: 'preview', alt: meta.name || '图片', title: (meta.name || '图片') + ' · 点击查看大图' });
     img.addEventListener('click', () => { $('viewImg').src = img.src; $('dlgView').showModal(); });
-    body.append(img);
-    const copyBtn = h('button', { class: 'btn soft sm', type: 'button', disabled: true, onclick: () => copyImage(entry) }, '复制图片');
+    img.addEventListener('load', () => setInfo(`${fmtSize(meta.size)} · ${img.naturalWidth}×${img.naturalHeight}`), { once: true });
+    body.append(h('div', { class: 'shot' }, img));
+    setInfo(fmtSize(meta.size));
+    const copyBtn = iconBtn('复制图片', 'copy', () => copyImage(entry, copyBtn), 'btn primary sm');
+    copyBtn.disabled = true;
     actions.append(copyBtn);
     getBlob(entry).then((b) => {
       entry.url = URL.createObjectURL(b);
       img.src = entry.url;
       copyBtn.disabled = false;
-      if (canShareFiles()) actions.append(h('button', { class: 'btn ghost sm', type: 'button', onclick: () => shareBlob(meta, b) }, '分享 / 存相册'));
+      if (canShareFiles()) actions.insertBefore(iconBtn('分享 / 存相册', 'share', () => shareBlob(meta, b), 'btn ghost sm'), dl);
     }).catch(() => { body.replaceChildren(h('p', { class: 'error' }, '（解密失败）')); });
-  } else {
-    body.append(h('div', { class: 'file' },
-      h('span', { class: 'file-icon' }, fileIcon(meta)),
-      h('div', { class: 'file-info' }, h('span', { class: 'file-name' }, meta.name || '文件'), h('span', { class: 'muted small' }, fmtSize(meta.size)))));
-    if (/^(video|audio)\//.test(meta.type || '') && meta.size <= MEDIA_MAX) {
-      const play = h('button', { class: 'btn soft sm', type: 'button' }, '▶ 预览');
-      play.addEventListener('click', async () => {
-        play.disabled = true;
-        try {
-          const b = await getBlob(entry, { onProgress: (p) => { play.textContent = `解密 ${Math.round(p * 100)}%`; } });
-          entry.url ||= URL.createObjectURL(b);
-          const media = h(meta.type.startsWith('video/') ? 'video' : 'audio', { class: 'media', controls: true, src: entry.url, playsinline: true });
-          body.append(media);
-          play.remove();
-          media.play().catch(() => {});
-        } catch (e) { toast('预览失败：' + e.message); play.disabled = false; play.textContent = '▶ 预览'; }
-      });
-      actions.append(play);
-    }
+    actions.append(dl);
+    return el;
   }
-  const dl = h('button', { class: entry.kind === 'image' ? 'btn ghost sm' : 'btn soft sm', type: 'button' }, '下载');
-  dl.addEventListener('click', () => download(entry, dl));
-  actions.append(dl);
+
+  // generic file (and images too large to preview)
+  const ft = fileType(meta);
+  setInfo(fmtSize(meta.size));
+  body.append(h('div', { class: 'file', 'data-tone': ft.tone },
+    h('div', { class: 'file-icon' }, icon('file'), h('span', { class: 'file-ext' }, ft.label)),
+    h('div', { class: 'file-info' },
+      h('span', { class: 'file-name', title: meta.name || '' }, meta.name || '文件'),
+      h('span', { class: 'file-sub' }, `${ft.desc} · ${fmtSize(meta.size)}`)),
+    dl));
+  if (/^(video|audio)\//.test(meta.type || '') && meta.size <= MEDIA_MAX) {
+    const play = iconBtn('在线播放', 'play', null, 'btn soft sm');
+    play.addEventListener('click', async () => {
+      play.disabled = true;
+      try {
+        const b = await getBlob(entry, { onProgress: (p) => setLabel(play, `解密 ${Math.round(p * 100)}%`) });
+        entry.url ||= URL.createObjectURL(b);
+        const media = h(meta.type.startsWith('video/') ? 'video' : 'audio', { class: 'media', controls: true, src: entry.url, playsinline: true });
+        body.append(media);
+        play.remove();
+        media.play().catch(() => {});
+      } catch (e) { toast('预览失败：' + e.message); play.disabled = false; setLabel(play, '在线播放'); }
+    });
+    actions.append(play);
+  }
   return el;
 }
 
@@ -388,10 +494,10 @@ async function shareBlob(meta, blob) {
 async function download(entry, btn) {
   if (entry.dl) { entry.dl.abort(); return; }
   const { meta } = entry;
-  const label = btn.textContent;
+  const label = btn.querySelector('.lbl')?.textContent ?? btn.textContent;
   const ac = new AbortController();
   const bar = entry.prog.firstChild;
-  const onProgress = (p) => { bar.style.width = `${p * 100}%`; btn.textContent = `取消 ${Math.round(p * 100)}%`; };
+  const onProgress = (p) => { bar.style.width = `${p * 100}%`; setLabel(btn, `取消 ${Math.round(p * 100)}%`); };
   let writable = null;
   try {
     if (meta.size >= DISK_STREAM_MIN && window.showSaveFilePicker && !entry.blob) {
@@ -400,7 +506,8 @@ async function download(entry, btn) {
     }
     entry.dl = ac;
     entry.prog.hidden = false;
-    btn.textContent = '取消';
+    setLabel(btn, '取消');
+    btn.classList.add('busy');
     if (writable) {
       await streamItem(entry, { signal: ac.signal, onProgress, onChunk: (c) => writable.write(c) });
       await writable.close();
@@ -422,7 +529,8 @@ async function download(entry, btn) {
     entry.dl = null;
     entry.prog.hidden = true;
     bar.style.width = '0';
-    btn.textContent = label;
+    setLabel(btn, label);
+    btn.classList.remove('busy');
   }
 }
 
@@ -436,7 +544,7 @@ async function removeEntry(entry) {
 }
 
 // ---------- clipboard out ----------
-async function copyText(text) {
+async function copyText(text, btn) {
   if (text == null) return;
   try {
     await navigator.clipboard.writeText(text);
@@ -449,7 +557,7 @@ async function copyText(text) {
     ta.remove();
     if (!ok) return toast('复制失败，请手动选择文字复制');
   }
-  toast('已复制');
+  if (btn) flash(btn); else toast('已复制');
 }
 
 function toPng(blob) {
@@ -470,11 +578,11 @@ function toPng(blob) {
   });
 }
 
-async function copyImage(entry) {
+async function copyImage(entry, btn) {
   try {
     if (!window.ClipboardItem || !navigator.clipboard?.write) throw new Error('浏览器不支持');
     await navigator.clipboard.write([new ClipboardItem({ 'image/png': getBlob(entry).then(toPng) })]); // promise keeps Safari's gesture
-    toast('图片已复制');
+    if (btn) flash(btn); else toast('图片已复制');
   } catch (e) {
     toast('复制图片失败：' + e.message + '（可以下载或长按图片保存）', 4000);
   }
@@ -527,23 +635,26 @@ function sendXhr(method, url, body, headers, onProgress, active) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const retryable = (e) => e.name !== 'AbortError' && (e.status === 0 || e.status === 409 || e.status === 429 || e.status >= 500);
 
-function transferCard(label, size, onCancel) {
+function transferCard(label, size, onCancel, kind = 'file') {
   const bar = h('div', { class: 'progress-bar' });
   const info = h('span', { class: 'muted small' }, '加密中…');
-  const el = h('div', { class: 'transfer' },
+  const pct = h('span', { class: 'transfer-pct' }, '0%');
+  const el = h('div', { class: `transfer item-${kind}` },
     h('div', { class: 'transfer-head' },
-      h('span', { class: 'transfer-icon' }, '⬆'),
-      h('span', { class: 'transfer-name' }, label),
-      h('span', { class: 'spacer' }),
-      h('button', { class: 'icon-btn', type: 'button', title: '取消', onclick: onCancel }, '✕')),
-    h('div', { class: 'progress' }, bar), info);
+      h('span', { class: 'transfer-icon' }, icon('upload')),
+      h('div', { class: 'transfer-main' },
+        h('div', { class: 'transfer-line' }, h('span', { class: 'transfer-name' }, label), pct),
+        h('div', { class: 'progress' }, bar),
+        info),
+      h('button', { class: 'icon-btn', type: 'button', title: '取消', onclick: onCancel }, icon('x'))));
   $('transfers').prepend(el);
   refreshCounts();
   const t0 = performance.now();
   return {
     update(sent) {
-      const pct = Math.min(100, (sent / size) * 100);
-      bar.style.width = pct + '%';
+      const p = Math.min(100, (sent / size) * 100);
+      bar.style.width = p + '%';
+      pct.textContent = Math.floor(p) + '%';
       const secs = (performance.now() - t0) / 1000;
       const speed = sent / Math.max(secs, 0.001);
       info.textContent = `${fmtSize(Math.min(sent, size))} / ${fmtSize(size)} · ${fmtSize(speed)}/s ${fmtEta((size - sent) / speed)}`;
@@ -565,7 +676,7 @@ async function upload(meta, blob, label) {
   const card = transferCard(label, total, () => {
     cancelled = true;
     for (const x of active) x.abort();
-  });
+  }, meta.k === 'text' ? 'text' : /^image\//.test(meta.type || '') ? 'image' : 'file');
   const loaded = new Float64Array(count);
   const progress = () => card.update(loaded.reduce((a, b) => a + b, 0));
   try {
@@ -782,7 +893,7 @@ function wire() {
   });
 
   $('btnAdd').addEventListener('click', openAdd);
-  $('btnCopyLink').addEventListener('click', () => copyText($('link').value));
+  $('btnCopyLink').addEventListener('click', () => copyText($('link').value, $('btnCopyLink')));
   $('dlgView').addEventListener('click', (e) => { if (e.target === $('dlgView') || e.target === $('viewImg')) $('dlgView').close(); });
 
   $('btnSettings').addEventListener('click', () => {
@@ -835,6 +946,7 @@ function wire() {
 }
 
 async function init() {
+  hydrateIcons();
   wire();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
   try { cfg = { ...cfg, ...(await (await api('/config')).json()) }; } catch {}
