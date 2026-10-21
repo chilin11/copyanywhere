@@ -1,14 +1,22 @@
 #!/bin/sh
 # CopyAnywhere 安装 / 更新 / 卸载（不需要 Docker）
 #
-#   sudo sh install.sh                    安装或更新（保留配置和数据）
-#   sudo sh install.sh --token <TOKEN>    同时安装 cloudflared 并接入这个 Tunnel
-#   sudo sh install.sh --port 8090        指定本机端口（默认 8090）
-#   sudo sh install.sh --uninstall        卸载程序（保留数据；加 --purge 连数据和配置一起删）
+# 直接从 GitHub 安装或更新（以后再运行同一条命令就是更新，配置和数据都保留）：
+#   curl -fsSL https://raw.githubusercontent.com/chilin11/copyanywhere/main/install.sh | sudo sh
+# 参数放在 "sh -s --" 后面：
+#   … | sudo sh -s -- --token <TOKEN>    同时安装 cloudflared 并接入这个 Tunnel
+#   … | sudo sh -s -- --port 8090        指定本机端口（默认 8090）
+#   … | sudo sh -s -- --uninstall        卸载程序（保留数据；加 --purge 连数据和配置一起删）
+# 也可以下载后运行：sudo sh install.sh [参数]
 #
 # 支持 systemd（Debian / Ubuntu / CentOS / Rocky …）和 OpenRC（Alpine），x86_64 / arm64 / armv7。
 set -eu
 
+# Everything runs inside main(), called on the last lines, so a "curl | sh" cut off midway executes nothing.
+main() {
+
+REPO=${CA_REPO:-chilin11/copyanywhere}
+REF=${CA_REF:-main}
 BUILD=dev
 NAME=copyanywhere
 APP_DIR=/opt/copyanywhere
@@ -37,7 +45,7 @@ while [ $# -gt 0 ]; do
     --port=*) PORT_ARG=${1#*=}; shift ;;
     --uninstall) MODE=uninstall; shift ;;
     --purge) PURGE=1; shift ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     *) die "未知参数：$1（--help 查看用法）" ;;
   esac
 done
@@ -52,8 +60,13 @@ if [ -n "$TOKEN" ]; then
   TOKEN=$t
 fi
 
+case ${0##*/} in
+  sh|bash|dash|ash|busybox|-*) RUN="curl -fsSL https://raw.githubusercontent.com/$REPO/$REF/install.sh | sudo sh -s --" ;;
+  *) RUN="sudo sh $0" ;;
+esac
+
 [ "$(uname -s)" = Linux ] || die "只支持 Linux"
-[ "$(id -u)" -eq 0 ] || die "请用 root 运行：sudo sh $0"
+[ "$(id -u)" -eq 0 ] || die "请用 root 运行（前面加 sudo）"
 
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
   INIT=systemd
@@ -108,7 +121,7 @@ if [ $MODE = uninstall ]; then
     fi
     log "已卸载，数据和配置已删除"
   else
-    log "已卸载。数据保留在 $DATA_DIR，配置在 $CONF_DIR（重新安装会接着用；彻底删除：sudo sh $0 --uninstall --purge）"
+    log "已卸载。数据保留在 $DATA_DIR，配置在 $CONF_DIR（重新安装会接着用；彻底删除：$RUN --uninstall --purge）"
   fi
   exit 0
 fi
@@ -138,15 +151,28 @@ esac
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
-# ---------- program files: embedded payload, or the files next to this script ----------
-if grep -q '^__PAYLOAD_BELOW__$' "$0" 2>/dev/null; then
+# ---------- program files: embedded payload, a checkout next to this script, or GitHub ----------
+if [ -f "$0" ] && grep -q '^__PAYLOAD_BELOW__$' "$0" 2>/dev/null; then
   sed '1,/^__PAYLOAD_BELOW__$/d' "$0" | base64 -d | tar -xzf - -C "$WORK" || die "安装包已损坏，请重新上传 install.sh"
   SRC=$WORK/app
-else
+elif [ -f "$0" ] && [ -f "$(dirname "$0")/server.js" ]; then
   SRC=$(cd "$(dirname "$0")" && pwd)
+  BUILD="$(cd "$SRC" && git rev-parse --short HEAD 2>/dev/null || echo local) $(date -u +%Y-%m-%d)"
+else
+  # pin the exact commit so the version shown is meaningful (the API is optional: falls back to the branch)
+  sha=
+  if fetch "https://api.github.com/repos/$REPO/commits/$REF" "$WORK/commit.json" 2>/dev/null; then
+    sha=$(grep -o '"sha": *"[0-9a-f]\{40\}"' "$WORK/commit.json" | head -n 1 | grep -o '[0-9a-f]\{40\}' || true)
+  fi
+  ref=${sha:-$REF}
+  log "从 GitHub 下载 $REPO@$(printf '%s' "$ref" | cut -c 1-12)…"
+  fetch "https://codeload.github.com/$REPO/tar.gz/$ref" "$WORK/src.tgz" || die "下载失败（需要能访问 github.com）"
+  mkdir -p "$WORK/src"
+  tar -xzf "$WORK/src.tgz" -C "$WORK/src" || die "源码包损坏"
+  for d in "$WORK/src"/*/; do SRC=${d%/}; done
+  BUILD="$(printf '%s' "$ref" | cut -c 1-7) $(date -u +%Y-%m-%d)"
 fi
-[ -f "$SRC/server.js" ] && [ -d "$SRC/public" ] && [ -f "$SRC/package.json" ] \
-  || die "找不到程序文件。请上传打包好的单文件 install.sh，或在项目目录里运行"
+[ -f "$SRC/server.js" ] && [ -d "$SRC/public" ] && [ -f "$SRC/package.json" ] || die "找不到程序文件"
 [ -f "$SRC/VERSION" ] && BUILD=$(cat "$SRC/VERSION")
 
 # ---------- Node.js ----------
@@ -203,7 +229,7 @@ chmod 700 $DATA_DIR $CONF_DIR
 if [ ! -f "$ENV_FILE" ]; then
   p=${PORT_ARG:-8090}
   if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -q "[:.]$p\$"; then
-    die "端口 $p 已被占用，换一个：sudo sh $0 --port 8091"
+    die "端口 $p 已被占用，换一个：$RUN --port 8091"
   fi
   pw=$(head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')
   avail=$(df -Pk $DATA_DIR | awk 'NR==2 { print int($4 / 1024) }')
@@ -364,7 +390,7 @@ else
   echo "下一步：接入 cloudflared（Service 填 http://127.0.0.1:$PORT）"
   echo "    · VPS 上已有 cloudflared：在它的隧道里加一个 Public Hostname 即可"
   echo "    · 还没有：Zero Trust → Networks → Tunnels 新建隧道，复制 token，然后运行"
-  echo "        sudo sh $0 --token <TOKEN>"
+  echo "        $RUN --token <TOKEN>"
 fi
 echo
 log "完成。打开 https://<你的域名> ，输入服务器密码创建空间，再用手机扫码添加设备。"
@@ -372,5 +398,20 @@ echo "    服务器密码：$(envget PASSWORD)"
 echo "    存储上限：  $(envget MAX_TOTAL_MB) MB（全部空间合计，满了自动删最旧的）"
 echo "    配置文件：  $ENV_FILE（改完 $rs）"
 echo "    状态 / 日志：$st  /  $lg"
-echo "    更新：上传新的 install.sh 后再运行一次；卸载：sudo sh $0 --uninstall"
+echo "    更新：再运行一次安装命令"
+echo "    卸载：$RUN --uninstall"
+}
+
+usage() {
+  cat <<'USAGE'
+CopyAnywhere 安装 / 更新 / 卸载
+
+  curl -fsSL https://raw.githubusercontent.com/chilin11/copyanywhere/main/install.sh | sudo sh
+  … | sudo sh -s -- --token <TOKEN>   同时安装 cloudflared 并接入 Tunnel
+  … | sudo sh -s -- --port <PORT>     本机端口（默认 8090）
+  … | sudo sh -s -- --uninstall       卸载（保留数据；加 --purge 一起删除）
+USAGE
+}
+
+main "$@"
 exit 0

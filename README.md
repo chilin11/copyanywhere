@@ -13,18 +13,16 @@
 
 需要一台 Linux VPS（systemd 或 Alpine/OpenRC，x86_64 / arm64 / armv7）和一个托管在 Cloudflare 的域名。不需要开放任何入站端口。
 
-**1. 在电脑上生成单文件安装包**（程序文件都打包在里面，约 400KB）：
+在 VPS 上运行这一条命令（以后再运行同一条就是更新，配置、密码和数据都保留）：
 
 ```bash
-npm run bundle          # 生成 dist/install.sh
-scp dist/install.sh root@你的VPS:/root/
+curl -fsSL https://raw.githubusercontent.com/chilin11/copyanywhere/main/install.sh | sudo sh
 ```
 
-**2. 在 VPS 上运行：**
+还没有 cloudflared 的话，在 Zero Trust → Networks → Tunnels 新建隧道，复制 token，用这条命令顺带装上：
 
 ```bash
-sudo sh install.sh                    # 安装 / 更新
-sudo sh install.sh --token eyJ...     # 同时安装 cloudflared 并接入 Tunnel（还没有 cloudflared 时用）
+curl -fsSL https://raw.githubusercontent.com/chilin11/copyanywhere/main/install.sh | sudo sh -s -- --token eyJ...
 ```
 
 脚本会：
@@ -36,13 +34,13 @@ sudo sh install.sh --token eyJ...     # 同时安装 cloudflared 并接入 Tunne
 然后在 Cloudflare **Zero Trust → Networks → Tunnels → 你的隧道 → Public Hostname** 添加域名，Service 选 **HTTP**，URL 填 **`127.0.0.1:8090`**。
 
 - VPS 上已经在跑 cloudflared：不用 `--token`，直接在那个隧道里加 Public Hostname（`config.yml` 模式则在 `ingress` 里加 `service: http://127.0.0.1:8090`）。
-- **更新**：重新 `npm run bundle`，上传覆盖，再运行一次 `sudo sh install.sh`（配置、密码和数据都保留）。
-- **换端口**：`sudo sh install.sh --port 8091`
+- **更新**：再运行一次上面的安装命令。
+- **换端口**：`… | sudo sh -s -- --port 8091`
 - **状态 / 日志**：`systemctl status copyanywhere` / `journalctl -u copyanywhere -f`（Alpine：`rc-service copyanywhere status` / `/var/log/copyanywhere.log`）
 - **配置**（`/etc/copyanywhere/env`）：`TTL_HOURS` 保存时长、`MAX_TOTAL_MB` 总容量（默认 5120）、`MAX_FILE_MB` 单文件上限（默认等于总容量）、`MAX_ITEMS` 每个空间条数、`MIN_FREE_MB` 磁盘保留空间。改完 `systemctl restart copyanywhere`。
-- **卸载**：`sudo sh install.sh --uninstall`（保留数据）；`--uninstall --purge` 连数据、配置一起删。
+- **卸载**：`… | sudo sh -s -- --uninstall`（保留数据）；`--uninstall --purge` 连数据、配置一起删。
 
-> 也可以 `git clone` 到 VPS 上，在项目目录里直接 `sudo sh install.sh`，效果相同。
+> VPS 访问不了 GitHub 时：在电脑上 `npm run bundle` 生成带程序文件的单文件 `dist/install.sh`，上传后 `sudo sh install.sh`。也可以 `git clone` 后在项目目录里运行 `sudo sh install.sh`。
 > 有 Docker 的机器可以用 `./install-docker.sh`（见 `docker-compose.yml`、`.env.example`）。
 
 > 不要在 Cloudflare 上给这个域名开 Rocket Loader / 自动压缩 JS 一类会改写页面的功能，它们会被 CSP 拦下。
