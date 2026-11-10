@@ -19,7 +19,7 @@
   <header class="bar">
     <div class="brand"><img src="/icon.svg" alt="" width="30" height="30"><span>CopyAnywhere</span></div>
     <div class="bar-actions" id="barActions" hidden>
-      <button class="pill space-pill" id="spaceIdentity" type="button" title="与另一台设备顶部的空间代号核对；点击自查">空间 <b class="fp" id="spaceFp">—</b><span id="spacePeers"></span></button>
+      <button class="pill space-pill" id="spaceIdentity" type="button" title="短指纹仅供参考，不是完整 Token；点击自查">指纹 <b class="fp" id="spaceFp">—</b><span id="spacePeers"></span></button>
       <button class="pill" id="status" type="button" data-state="connecting"><i></i><span id="statusText" aria-live="polite">连接中…</span></button>
       <button class="btn ghost" id="btnAdd" type="button"><i data-icon="plus"></i><span class="hide-sm">添加设备</span></button>
       <button class="btn ghost" id="btnDiag" type="button">自查</button>
@@ -36,26 +36,28 @@
         <p class="muted">手机、Mac、Windows 之间互传文字、截图和文件，不在同一个网络也能用。</p>
       </div>
       <form id="formJoin" class="card form">
-        <label for="joinLink">加入已有空间</label>
-        <input id="joinLink" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴配对链接或密钥" required>
-        <button class="btn primary block" type="submit">加入空间</button>
-        <p class="muted small">在另一台设备选择「添加设备」获取链接。iPhone 主屏幕应用可能需要重新加入。</p>
+        <label for="joinLink">使用已有 Token 连接</label>
+        <input id="joinLink" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 Token 或原配对链接" required>
+        <button class="btn primary block" type="submit">连接</button>
+        <p class="muted small">在同一服务器使用相同 Token 的设备共享内容。在已连接的设备选择「添加设备」获取 Token 或链接。</p>
+        <p class="small"><b>Token 等同私钥，只发给自己的设备；它不是服务器创建密码。</b></p>
       </form>
       <form id="formCreate" class="card form">
-        <label for="pw">服务器密码</label>
-        <input id="pw" type="password" autocomplete="current-password" placeholder="安装时生成的 PASSWORD" required>
-        <button class="btn primary block" type="submit">创建我的空间</button>
+        <label for="pw">首次使用？创建新的 Token</label>
+        <input id="pw" type="password" autocomplete="current-password" placeholder="服务器创建密码 PASSWORD" required>
+        <button class="btn primary block" type="submit">创建并连接</button>
+        <p class="muted small">服务器创建密码仅用于创建，和用于连接及加密的 Token 不同。</p>
       </form>
       <div class="card form" id="setupProblem" hidden>
         <p class="error" id="setupError"></p>
-        <div class="row"><button class="btn ghost" type="button" id="retrySpace">重试连接</button><button class="btn ghost danger" type="button" id="forgetSpace">在本机移除密钥</button></div>
+        <div class="row"><button class="btn ghost" type="button" id="retrySpace">重试连接</button><button class="btn ghost danger" type="button" id="forgetSpace">在本机移除 Token</button></div>
       </div>
       <ul class="features">
         <li><span class="f-ic f-text"><i data-icon="lock"></i></span><div><b>端到端加密</b><span class="muted">在本机加密后才上传，服务器只存密文</span></div></li>
         <li><span class="f-ic f-image"><i data-icon="zap"></i></span><div><b>实时同步</b><span class="muted">一台设备发送，其他设备立刻收到</span></div></li>
         <li><span class="f-ic f-file"><i data-icon="clock"></i></span><div><b>用完即焚</b><span class="muted">到期自动删除，也可随时清空</span></div></li>
       </ul>
-      <p class="muted small center">已经在别的设备上创建过？在那台设备上点右上角 <b>＋ 添加设备</b>，扫码或打开链接加入。</p>
+      <p class="muted small center">已经连接过？在那台设备上点右上角 <b>＋ 添加设备</b>，扫码或复制 Token 加入。iPhone 主屏幕 App 可能需要重新连接。</p>
     </section>
 
     <!-- main -->
@@ -119,12 +121,13 @@
   <dialog id="dlgAdd">
     <form method="dialog" class="dlg">
       <div class="dlg-head"><h2>添加设备</h2><b class="fp" id="addIdentity"></b></div>
-      <p class="muted small"><span id="addHint"></span> iPhone 主屏幕 App 需在 App 内再粘贴一次链接。</p>
+      <p class="muted small"><span id="addHint"></span> iPhone 主屏幕 App 可在 App 内粘贴 Token 或链接。</p>
       <p class="small" id="addPeers" aria-live="polite"></p>
-      <p class="muted small">用另一台设备扫码，或打开下面的链接。<b>这个链接就是钥匙</b>，拿到它就能看到空间里的全部内容，只发给自己的设备。</p>
-      <div class="qr-wrap"><canvas id="qr" width="264" height="264"></canvas></div>
-      <input id="link" readonly>
+      <p class="small"><b>Token 等同私钥，二维码和链接也包含 Token；只发给自己的设备，不要公开展示。它不是服务器创建密码。</b></p>
+      <p class="muted small">在同一服务器扫码，或复制 Token / 链接到另一台设备。</p>
+      <div class="qr-wrap"><canvas id="qr" width="264" height="264" aria-label="包含 Token 的配对二维码"></canvas></div>
       <div class="row">
+        <button class="btn ghost" id="btnCopyToken" type="button"><i data-icon="copy"></i><span class="lbl">复制 Token</span></button>
         <button class="btn ghost" id="btnCopyLink" type="button"><i data-icon="copy"></i><span class="lbl">复制链接</span></button>
         <span class="spacer"></span>
         <button class="btn primary" value="close">完成</button>
@@ -136,11 +139,11 @@
     <form method="dialog" class="dlg">
       <h2>对方看不到？</h2>
       <ol class="steps">
-        <li><b>是不是同一个空间</b><span class="verdict" id="diagStep1"></span>
-          <span class="muted small">看另一台设备顶部的空间代号。不一样 → 在这台设备上复制配对链接，到另一台粘贴加入。</span>
+        <li><b>服务器和 Token 是否一致</b><span class="verdict" id="diagStep1"></span>
+          <span class="muted small">确认两台设备连接同一服务器并使用相同 Token。短指纹仅供参考，不是完整 Token；相同也不能证明 Token 一致。</span>
           <button type="button" class="btn ghost sm" id="diagCopyLink"><span class="lbl">复制配对链接</span></button></li>
         <li><b>对方在线吗</b><span class="verdict" id="diagStep2"></span>
-          <span class="muted small">只有本机 → 另一台没打开页面，或不在这个空间。</span></li>
+          <span class="muted small">只有本机 → 另一台可能没有打开页面，或使用了不同的服务器或 Token。</span></li>
         <li><b>实时通道通吗</b><span class="verdict" id="diagStep3"></span>
           <span class="muted small">不通通常是反向代理缓冲了事件流，内容仍会在几秒内出现。复制诊断信息发给管理员。</span></li>
       </ol>
@@ -148,7 +151,7 @@
         <summary>连接诊断</summary>
         <dl class="diag-table" id="diagTable"></dl>
       </details>
-      <p class="muted small">诊断信息不含密钥、完整空间 ID 或任何内容。</p>
+      <p class="muted small">诊断信息不含 Token、完整内部 ID 或任何内容。</p>
       <div class="row"><button type="button" class="btn ghost" id="copyDiag"><span class="lbl">复制诊断信息</span></button><button type="button" class="btn ghost" id="diagRetest">重新测试</button><span class="spacer"></span><button class="btn primary">完成</button></div>
     </form>
   </dialog>
@@ -161,19 +164,30 @@
         <input id="devName" maxlength="40">
       </div>
       <label class="check"><input type="checkbox" id="autoCopy"><span>收到其他设备的文字时自动复制 <span class="muted small">（页面需在前台）</span></span></label>
-      <div class="row"><button class="btn ghost" id="btnDiagSettings" type="button">连接诊断 / 对方看不到？</button></div>
+      <div class="row"><button class="btn ghost" id="btnDiagSettings" type="button">连接诊断 / 对方看不到？</button><button class="btn ghost" id="btnSwitch" type="button">更换 Token</button></div>
       <div class="danger-zone">
         <div class="row">
           <button class="btn ghost" id="btnClear" type="button">清空全部内容</button>
           <button class="btn ghost danger" id="btnLeave" type="button">本设备退出</button>
-          <button class="btn ghost danger" id="btnDestroy" type="button">删除整个空间</button>
+          <button class="btn ghost danger" id="btnDestroy" type="button">删除当前连接及内容</button>
         </div>
-        <p class="muted small">退出只清除本设备上的密钥，其他设备不受影响。删除会立即清空服务器上的全部密文，所有设备都会失效。</p>
+        <p class="muted small">退出只清除本设备上的 Token，其他设备不受影响。删除会立即删除服务器上当前 Token 对应的全部密文，使用此 Token 的所有设备都会失效。</p>
       </div>
       <div class="row">
         <span class="spacer"></span>
         <button class="btn primary" value="close">完成</button>
       </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgSwitch">
+    <form id="formSwitch" class="dlg">
+      <h2>更换 Token</h2>
+      <p class="muted small">请输入同一服务器上已有的 Token 或原配对链接。切换前请备份当前 Token；切换不会删除服务器数据。</p>
+      <label for="switchLink">Token 或配对链接</label>
+      <input id="switchLink" type="password" autocomplete="off" spellcheck="false" required>
+      <p class="error" id="switchError" role="alert"></p>
+      <div class="row"><button class="btn ghost" id="cancelSwitch" type="button">取消</button><span class="spacer"></span><button class="btn primary" type="submit">验证并切换</button></div>
     </form>
   </dialog>
 

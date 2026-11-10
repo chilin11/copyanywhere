@@ -238,11 +238,11 @@ function showMain() {
   $('foot').textContent = `端到端加密 · 内容 ${Math.round(cfg.ttlMs / 3600e3)} 小时后自动删除 · 单个文件最大 ${fmtSize(cfg.maxFileBytes)}`;
 }
 
-const STATUS_TEXT = { live: '实时同步', degraded: '轮询同步', offline: '离线', connecting: '连接中…', gone: '空间不存在' };
+const STATUS_TEXT = { live: '实时同步', degraded: '轮询同步', offline: '离线', connecting: '连接中…', gone: '连接不存在' };
 const STATUS_HELP = {
   live: '新内容会立刻出现。',
   degraded: '实时通道暂时不通，每 5 秒同步一次。',
-  offline: '网络恢复后会自动同步，待发送的内容会自动重发。',
+  offline: '页面保持打开时，连接恢复后会尝试同步和重发待发送内容。',
   connecting: '正在连接服务器…',
 };
 let noticeTimer = null;
@@ -257,7 +257,7 @@ function setStatus(state) {
     noticeTimer = setTimeout(() => {
       if (sync?.status !== state) return;
       $('connNoticeText').textContent = state === 'offline'
-        ? '网络已断开。恢复后会自动同步，待发送的内容会自动重发。'
+        ? '暂时无法连接服务器。页面保持打开时，连接恢复后会尝试同步和重发待发送内容。'
         : '实时通道暂时不通，已改为每 5 秒同步一次，新内容可能延迟几秒。';
       $('connNotice').dataset.state = state;
       $('connNotice').hidden = false;
@@ -295,7 +295,7 @@ function refreshCounts() {
   $('cntFile').textContent = c.file;
   $('empty').hidden = c.all > 0 || $('transfers').children.length > 0 || undecryptable.size > 0;
   $('undecryptable').hidden = !undecryptable.size;
-  $('undecryptableText').textContent = `有 ${undecryptable.size} 条内容无法解密（可能已损坏，或不是用本空间的钥匙加密的）`;
+  $('undecryptableText').textContent = `有 ${undecryptable.size} 条内容无法解密（可能已损坏，或不是用当前 Token 加密的）`;
 }
 
 // ---------- new-content hints (03 §2.8) ----------
@@ -421,7 +421,7 @@ function spaceGone() {
   if (secret) localStorage.setItem('ca.secret.prev', secret);
   const fp = space?.fp;
   clearFeed();
-  showSetup(`服务器上找不到这个空间${fp ? `（${fp}）` : ''}。可能是空间被删除，或服务器数据被重置。本机的钥匙还在，没有被清除，可以重试或粘贴新的配对链接。`);
+  showSetup(`服务器上找不到当前 Token 对应的连接${fp ? `（短指纹 ${fp}）` : ''}。它可能已被删除，或服务器数据被重置。本机 Token 仍然保留，可以重试或粘贴其他 Token 或配对链接。`);
 }
 
 async function syncItems(list, initial = false, rev = undefined) {
@@ -665,11 +665,11 @@ async function copyText(text, btn) {
   } catch {
     const ta = h('textarea', { class: 'offscreen' });
     ta.value = text;
-    document.body.append(ta);
+    (btn?.closest('dialog[open]') || document.body).append(ta);
     ta.select();
     const ok = document.execCommand('copy');
     ta.remove();
-    if (!ok) return toast('复制失败，请手动选择文字复制');
+    if (!ok) return toast('复制失败，请检查剪贴板权限后重试');
   }
   if (btn) flash(btn); else toast('已复制');
 }
@@ -793,7 +793,7 @@ function failReason(e) {
   if (e.code === 'too_large' || e.status === 413) return `超过大小上限 ${fmtSize(cfg.maxFileBytes)}`;
   if (e.code === 'disk_full') return '服务器磁盘已满，请联系管理员';
   if (e.code === 'storage_busy') return '服务器正忙于其他上传';
-  if (missingSpace(e)) return '空间不存在';
+  if (missingSpace(e)) return '当前 Token 对应的连接不存在';
   if (isNetworkError(e)) return '网络连接失败';
   if (e.code === 'upload_conflict') return '与未完成的上传冲突，请重新发送';
   return `服务器错误（${e.code || e.status || '未知'}）`;
@@ -903,7 +903,7 @@ async function upload(meta, blob, label, opts = {}) {
   });
   let metaStr;
   const attempt = async () => {
-    if (cancelled || space !== current) throw abortError('已取消或空间已切换');
+    if (cancelled || space !== current) throw abortError('已取消或 Token 已切换');
     setState('encrypting'); card.status('加密中…'); card.restart();
     metaStr ||= await encryptMeta(key, meta);
     if (count === 1) {
@@ -1110,9 +1110,8 @@ function drawQr(text) {
 function openAdd() {
   const link = `${location.origin}/#s=${space.secret}`;
   drawQr(link);
-  $('link').value = link;
-  $('addIdentity').textContent = `空间 ${space.fp}`;
-  $('addHint').textContent = `加入后，对方顶部也会显示 ${space.fp}。`;
+  $('addIdentity').textContent = `指纹 ${space.fp}`;
+  $('addHint').textContent = '短指纹仅供参考，不是完整 Token，也不能证明 Token 一致。';
   renderAddPeers(sync?.peers ?? null, null);
   $('dlgAdd').showModal();
 }
@@ -1174,18 +1173,18 @@ function renderDiag() {
   if (!space) return;
   const i = sync?.info() || {};
   const st = i.status;
-  $('diagStep1').textContent = `本机空间：${space.fp}`;
+  $('diagStep1').textContent = `本机短指纹：${space.fp}`;
   $('diagStep2').textContent = i.peers == null || st === 'offline' ? '在线设备数暂不可用' : i.peers <= 1 ? '只有本机在线' : `当前在线：${i.peers} 台`;
   $('diagStep2').classList.toggle('warn', i.peers != null && i.peers <= 1);
   const echo = i.echo || {};
   $('diagStep3').textContent = st === 'live'
     ? (echo.result === 'ok' ? `实时同步正常（往返 ${echo.rttMs} ms）` : echo.result === 'pending' ? '实时同步已连接，正在自测…' : '实时同步已连接')
     : st === 'degraded' ? (echo.result === 'fail' ? '实时通道被缓冲或阻断，已改为每 5 秒同步' : '实时通道不通，已改为每 5 秒同步')
-    : st === 'offline' ? '本机离线，恢复后自动同步' : '正在连接…';
+    : st === 'offline' ? '暂时无法连接服务器，恢复后会尝试同步' : '正在连接…';
   $('diagStep3').classList.toggle('warn', st !== 'live');
   const r = diagReport();
   const rows = [
-    ['空间', `${r.space.fingerprint} · ID ${r.space.idPrefix}…`],
+    ['连接', `短指纹 ${r.space.fingerprint} · 内部 ID ${r.space.idPrefix}…`],
     ['本机', `${r.device}${r.standalone ? ' · 主屏幕 App' : ''}${r.secureContext ? '' : ' · 非安全上下文'}`],
     ['协议', `客户端 2 / 服务端 ${r.proto.server ?? '未知'}${r.proto.serverVersion ? `（${r.proto.serverVersion}）` : ''}`],
     ['状态', `${STATUS_TEXT[st] || '—'}${i.statusSince ? ` · 已持续 ${secs(Date.now() - i.statusSince)}` : ''}`],
@@ -1212,16 +1211,16 @@ function parseJoin(input) {
   } catch { return null; }
 }
 async function joinSpace(secret) {
-  if (!validSecret(secret)) throw new Error('链接或密钥不完整，请重新复制。');
+  if (!validSecret(secret)) throw new Error('Token 不完整，或链接无效、不是本服务器的链接，请重新复制。');
   const { id } = await deriveSpace(secret);
   try { await api(`/spaces/${id}`); }
-  catch (e) { throw new Error(missingSpace(e) ? '链接指向的空间不存在，原有空间未改变。' : '无法验证目标空间，请检查网络后重试。'); }
+  catch (e) { throw new Error(missingSpace(e) ? '本服务器上不存在此 Token 对应的连接，本机 Token 未改变。' : '无法验证 Token 对应的连接，请检查网络后重试。本机 Token 未改变。'); }
   const old = localStorage.getItem(LS.secret);
   if (old === secret && space?.secret === secret) return true;
   if (old && old !== secret) {
-    if ($('transfers').children.length) throw new Error('请先完成或取消正在发送的内容，再切换空间。');
+    if ($('transfers').children.length) throw new Error('请先完成或取消正在发送的内容，再切换 Token。');
     const oldId = (await deriveSpace(old)).id;
-    if (!confirm(`从空间 ${await fingerprint(oldId)} 切换到空间 ${await fingerprint(id)}？原空间不会被删除。`)) return false;
+    if (!confirm(`从短指纹 ${await fingerprint(oldId)} 切换到 ${await fingerprint(id)}？这会替换本机保存的 Token，但不会删除原有服务器数据。请先备份原 Token 或配对链接，否则可能无法找回。继续吗？`)) return false;
   }
   localStorage.setItem(LS.secret, secret);
   localStorage.removeItem('ca.secret.prev');
@@ -1243,13 +1242,13 @@ function wire() {
   });
   $('retrySpace').addEventListener('click', () => { const secret = localStorage.getItem(LS.secret) || localStorage.getItem('ca.secret.prev'); if (validSecret(secret)) openSpace(secret).catch(() => showSetup('连接失败，请重试。')); });
   $('forgetSpace').addEventListener('click', () => {
-    if (!confirm('仅在本机移除密钥？以后需要重新获取配对链接。')) return;
+    if (!confirm('仅在本机移除 Token？以后需要重新获取 Token 或配对链接。')) return;
     localStorage.removeItem(LS.secret); localStorage.removeItem('ca.secret.prev'); showSetup();
   });
   $('formCreate').addEventListener('submit', async (e) => {
     e.preventDefault();
     const pw = $('pw').value;
-    if (localStorage.getItem(LS.secret) && !confirm('创建新空间将替换本机保存的密钥，请先备份原空间配对链接。继续吗？')) return;
+    if ((localStorage.getItem(LS.secret) || localStorage.getItem('ca.secret.prev')) && !confirm('创建新的 Token 将替换本机保存的 Token，不会删除原有服务器数据。请先备份原 Token 或配对链接，否则可能无法找回。继续吗？')) return;
     const btn = e.submitter || $('formCreate').querySelector('button');
     btn.disabled = true;
     try {
@@ -1334,7 +1333,26 @@ function wire() {
     if (outboxState.size && !confirm('还有内容正在发送，刷新会中断文件上传（文字会在刷新后自动继续）。仍要刷新吗？')) return;
     location.reload();
   });
-  $('btnCopyLink').addEventListener('click', () => copyText($('link').value, $('btnCopyLink')));
+  $('btnCopyToken').addEventListener('click', () => copyText(space.secret, $('btnCopyToken')));
+  $('btnCopyLink').addEventListener('click', () => copyText(`${location.origin}/#s=${space.secret}`, $('btnCopyLink')));
+  $('btnSwitch').addEventListener('click', () => {
+    $('dlgSettings').close();
+    $('switchError').textContent = '';
+    $('switchLink').value = '';
+    $('dlgSwitch').showModal();
+  });
+  $('cancelSwitch').addEventListener('click', () => $('dlgSwitch').close());
+  $('dlgSwitch').addEventListener('close', () => { $('switchLink').value = ''; });
+  $('formSwitch').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = e.submitter;
+    btn.disabled = true;
+    $('switchError').textContent = '';
+    try {
+      if (await joinSpace(parseJoin($('switchLink').value))) $('dlgSwitch').close();
+    } catch (err) { $('switchError').textContent = err.message; }
+    finally { btn.disabled = false; }
+  });
   $('dlgView').addEventListener('click', (e) => { if (e.target === $('dlgView') || e.target === $('viewImg')) $('dlgView').close(); });
 
   $('btnSettings').addEventListener('click', () => {
@@ -1350,7 +1368,7 @@ function wire() {
     if (v && v !== guessDevice()) localStorage.setItem(LS.device, v); else localStorage.removeItem(LS.device);
   });
   $('btnClear').addEventListener('click', async () => {
-    if (!confirm('清空空间里的全部内容？所有设备都会同步清空。')) return;
+    if (!confirm('清空当前 Token 对应的全部内容？使用此 Token 的所有设备都会同步清空。')) return;
     try {
       await api(`/spaces/${space.id}/items`, { method: 'DELETE' });
       for (const id of [...entries.keys()]) dropEntry(id);
@@ -1358,13 +1376,13 @@ function wire() {
     } catch (e) { toast('清空失败：' + e.message); }
   });
   $('btnLeave').addEventListener('click', () => {
-    if (!confirm('在本设备退出？之后需要重新扫码才能加入。')) return;
+    if (!confirm('在本设备退出并移除 Token？之后需要 Token、配对链接或扫码才能重新连接。')) return;
     localStorage.removeItem(LS.secret);
     localStorage.removeItem('ca.secret.prev');
     location.replace('/');
   });
   $('btnDestroy').addEventListener('click', async () => {
-    if (!confirm('永久删除整个空间？服务器上的全部密文会立即删除，所有设备都会失效。')) return;
+    if (!confirm('永久删除当前 Token 对应的连接？服务器上的全部密文会立即删除，使用此 Token 的所有设备都会失效。')) return;
     try { await api(`/spaces/${space.id}`, { method: 'DELETE' }); } catch (e) { if (e.status !== 404) return toast('删除失败：' + e.message); }
     localStorage.removeItem(LS.secret);
     location.replace('/');
