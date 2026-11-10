@@ -21,16 +21,17 @@ async function receiveShare(request) {
       .filter((v) => typeof v === 'string' && v.trim())
       .filter((v, i, a) => a.indexOf(v) === i)
       .join('\n');
-    await caches.delete(SHARE_CACHE);
+    const batch = crypto.randomUUID();
+    const prefix = `/_share/batch/${batch}/`;
     const cache = await caches.open(SHARE_CACHE);
     await Promise.all(files.map((f, i) =>
-      cache.put(`/_share/file/${i}`, new Response(f, { headers: { 'Content-Type': f.type || 'application/octet-stream' } }))));
-    await cache.put('/_share/meta', new Response(JSON.stringify({
-      text,
+      cache.put(`${prefix}file/${i}`, new Response(f, { headers: { 'Content-Type': f.type || 'application/octet-stream' } }))));
+    if (text) await cache.put(`${prefix}text`, new Response(text));
+    await cache.put(`${prefix}meta`, new Response(JSON.stringify({
       files: files.map((f) => ({ name: f.name || `shared-${Date.now()}`, type: f.type || 'application/octet-stream' })),
     }), { headers: { 'Content-Type': 'application/json' } }));
+    return Response.redirect('/?share=1', 303);
   } catch (err) {
-    // fall through: the page simply opens without shared content
+    return Response.redirect('/?share=lost', 303);
   }
-  return Response.redirect('/?share=1', 303);
 }

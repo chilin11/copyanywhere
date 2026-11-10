@@ -3,6 +3,7 @@ import {
   b64u, newSecret, validSecret, deriveSpace, encryptMeta, decryptMeta,
   DEFAULT_CHUNK, GCM_OVERHEAD, chunkCount, cipherSize, encryptChunk, decryptStream,
 } from '/crypto.js';
+import { createSync, isMissingSpace, isNetworkError } from '/sync.js';
 
 const $ = (id) => document.getElementById(id);
 const LS = { secret: 'ca.secret', device: 'ca.device', did: 'ca.did', autoCopy: 'ca.autocopy' };
@@ -14,15 +15,26 @@ const SHARE_CACHE = 'ca-share';
 const touch = matchMedia('(pointer: coarse)').matches;
 
 let cfg = { ttlMs: 24 * 3600e3, maxFileBytes: 5 * 1024 ** 3, maxTotalBytes: 5 * 1024 ** 3 };
-let space = null; // { secret, id, key }
-let es = null;
-let retryTimer = null;
+let configLoaded = false;
+let space = null; // { secret, id, key, fp, cid }
+let sync = null;  // sync engine (sync.js) for the current space
 let unread = 0;
 /** @type {Map<string, any>} id -> { raw, meta, el, kind, blob?, text?, url?, dl? } */
 const entries = new Map();
+const undecryptable = new Set(); // item ids whose metadata failed to decrypt (C11)
+const outboxState = new Map();   // itemId -> queued|encrypting|uploading|waiting|failed
+const newItemId = () => b64u(crypto.getRandomValues(new Uint8Array(12)));
+const newNonce = () => b64u(crypto.getRandomValues(new Uint8Array(16)));
+const ITEM_ID_RE = /^[A-Za-z0-9_-]{16}$/, NONCE_RE = /^[A-Za-z0-9_-]{22}$/;
+const validRecord = (r) => !!r && ITEM_ID_RE.test(r.itemId || '') && NONCE_RE.test(r.n || '');
 
-if (!localStorage.getItem(LS.did)) localStorage.setItem(LS.did, b64u(crypto.getRandomValues(new Uint8Array(9))));
-const deviceId = localStorage.getItem(LS.did);
+async function loadConfig() {
+  if (configLoaded) return;
+  cfg = { ...cfg, ...(await (await api('/config')).json()) };
+  configLoaded = true;
+}
+
+let deviceId = localStorage.getItem(LS.did);
 
 // ---------- utils ----------
 function h(tag, attrs = {}, ...children) {
@@ -195,9 +207,9 @@ function fileType(meta) {
 async function api(path, opts = {}) {
   const r = await fetch('/api' + path, { cache: 'no-store', ...opts });
   if (!r.ok) {
-    let msg = r.statusText;
-    try { msg = (await r.json()).error || msg; } catch {}
-    throw Object.assign(new Error(msg), { status: r.status });
+    let msg = r.statusText, code;
+    try { const body = await r.json(); msg = body.error || msg; code = body.code; } catch {}
+    throw Object.assign(new Error(msg), { status: r.status, code });
   }
   return r;
 }
@@ -207,13 +219,16 @@ const postJson = (path, body, headers = {}) =>
 // ---------- views ----------
 function showSetup(error) {
   space = null;
-  es?.close();
-  es = null;
+  sync?.stop();
+  sync = null;
+  setStatus(null);
   $('viewMain').hidden = true;
   $('barActions').hidden = true;
   $('viewSetup').hidden = false;
-  $('setupError').hidden = !error;
+  $('setupProblem').hidden = !error;
   $('setupError').textContent = error || '';
+  $('retrySpace').hidden = !localStorage.getItem(LS.secret);
+  $('forgetSpace').hidden = !localStorage.getItem(LS.secret) && !localStorage.getItem('ca.secret.prev');
 }
 
 function showMain() {
@@ -223,10 +238,44 @@ function showMain() {
   $('foot').textContent = `端到端加密 · 内容 ${Math.round(cfg.ttlMs / 3600e3)} 小时后自动删除 · 单个文件最大 ${fmtSize(cfg.maxFileBytes)}`;
 }
 
+const STATUS_TEXT = { live: '实时同步', degraded: '轮询同步', offline: '离线', connecting: '连接中…', gone: '空间不存在' };
+const STATUS_HELP = {
+  live: '新内容会立刻出现。',
+  degraded: '实时通道暂时不通，每 5 秒同步一次。',
+  offline: '网络恢复后会自动同步，待发送的内容会自动重发。',
+  connecting: '正在连接服务器…',
+};
+let noticeTimer = null;
 function setStatus(state) {
   const s = $('status');
-  s.dataset.state = state;
-  $('statusText').textContent = { online: '已连接', offline: '重连中', connecting: '连接中' }[state];
+  s.dataset.state = state || 'connecting';
+  $('statusText').textContent = STATUS_TEXT[state] || STATUS_TEXT.connecting;
+  s.title = (STATUS_HELP[state] || '') + ' 点击查看诊断。';
+  // 03 §2.9: explain offline/degraded only after 10 s, hide as soon as it recovers.
+  clearTimeout(noticeTimer);
+  if (state === 'degraded' || state === 'offline') {
+    noticeTimer = setTimeout(() => {
+      if (sync?.status !== state) return;
+      $('connNoticeText').textContent = state === 'offline'
+        ? '网络已断开。恢复后会自动同步，待发送的内容会自动重发。'
+        : '实时通道暂时不通，已改为每 5 秒同步一次，新内容可能延迟几秒。';
+      $('connNotice').dataset.state = state;
+      $('connNotice').hidden = false;
+    }, 10000);
+  } else $('connNotice').hidden = true;
+  renderIdentity();
+}
+
+/** Space strip: fingerprint + devices online (stream values only, 02 §5.3). */
+function renderIdentity() {
+  if (!space) return;
+  const fp = $('spaceFp');
+  fp.textContent = space.fp;
+  fp.style.setProperty('--hue', hue(space.fp));
+  const n = sync?.status === 'offline' || sync?.status === 'gone' ? null : sync?.peers ?? null;
+  const el = $('spacePeers');
+  el.textContent = n === null ? '' : n <= 1 ? ' · 只有本机在线' : ` · ${n} 台在线`;
+  el.classList.toggle('muted', n !== null && n <= 1);
 }
 
 function setUsage(u) {
@@ -244,7 +293,44 @@ function refreshCounts() {
   $('cntText').textContent = c.text;
   $('cntImage').textContent = c.image;
   $('cntFile').textContent = c.file;
-  $('empty').hidden = c.all > 0 || $('transfers').children.length > 0;
+  $('empty').hidden = c.all > 0 || $('transfers').children.length > 0 || undecryptable.size > 0;
+  $('undecryptable').hidden = !undecryptable.size;
+  $('undecryptableText').textContent = `有 ${undecryptable.size} 条内容无法解密（可能已损坏，或不是用本空间的钥匙加密的）`;
+}
+
+// ---------- new-content hints (03 §2.8) ----------
+const hiddenFresh = new Map(); // kind -> count of new items hidden by the active filter
+let freshAbove = 0;            // new items above the viewport
+const currentFilter = () => $('feed').dataset.filter || 'all';
+function setFilter(filter) {
+  for (const c of $('chips').children) c.classList.toggle('active', c.dataset.filter === filter);
+  $('feed').dataset.filter = filter;
+  if (filter === 'all') hiddenFresh.clear(); else hiddenFresh.delete(filter);
+  renderFreshHints();
+}
+function feedTopHidden() { return $('feed').getBoundingClientRect().top < 0; }
+function noteFresh(entry) {
+  const f = currentFilter();
+  if (f !== 'all' && f !== entry.kind) hiddenFresh.set(entry.kind, (hiddenFresh.get(entry.kind) || 0) + 1);
+  else if (feedTopHidden()) freshAbove++;
+  renderFreshHints();
+}
+function renderFreshHints() {
+  const total = [...hiddenFresh.values()].reduce((a, b) => a + b, 0);
+  $('filterHint').hidden = !total;
+  if (total) {
+    const kinds = [...hiddenFresh.keys()];
+    $('filterHintText').textContent = kinds.length === 1 ? `有 ${total} 条新的${KIND[kinds[0]].label}` : `有 ${total} 条新内容被筛选隐藏`;
+    $('filterHintView').dataset.filter = kinds.length === 1 ? kinds[0] : 'all';
+  }
+  $('freshPill').hidden = !freshAbove;
+  $('freshPillText').textContent = `↑ ${freshAbove} 条新内容`;
+}
+function clearFeed() {
+  for (const id of [...entries.keys()]) dropEntry(id);
+  undecryptable.clear();
+  hiddenFresh.clear(); freshAbove = 0;
+  renderFreshHints(); refreshCounts();
 }
 
 function bumpUnread() {
@@ -254,73 +340,94 @@ function bumpUnread() {
 }
 
 // ---------- space lifecycle ----------
+const missingSpace = isMissingSpace;
+async function digest(text) { return new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))); }
+async function fingerprint(id) {
+  const b = await digest('copyanywhere/fp\n' + id);
+  const n = (b[0] << 12) | (b[1] << 4) | (b[2] >> 4);
+  const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+  return [15, 10, 5, 0].map((shift) => alphabet[(n >> shift) & 31]).join('');
+}
 async function openSpace(secret) {
   const { id, key } = await deriveSpace(secret);
-  space = { secret, id, key };
-  let data = { items: [] };
-  try {
-    data = await (await api(`/spaces/${id}`)).json();
-  } catch (e) {
-    if (e.status === 404) {
-      localStorage.removeItem(LS.secret);
-      return showSetup('这个空间不存在或已被删除，请重新创建或重新扫码。');
-    }
+  const fp = await fingerprint(id);
+  const cid = b64u(await digest(`copyanywhere/cid\n${deviceId}\n${id}`)).slice(0, 16);
+  sync?.stop();
+  sync = null;
+  const current = space = { secret, id, key, fp, cid };
+  let data = null;
+  try { data = await (await api(`/spaces/${id}`)).json(); }
+  catch (e) {
+    if (space !== current) return;
+    if (missingSpace(e)) return spaceGone();
     toast('暂时连不上服务器，稍后自动重试');
   }
+  if (space !== current) return;
   showMain();
-  setUsage(data.usage);
-  await syncItems(data.items, true);
-  connect();
-  consumeShareTarget().catch(() => {});
+  setStatus('connecting');
+  if (data) { setUsage(data.usage); await syncItems(data.items, true); }
+  if (space !== current) return;
+  startSync(data);
+  resumePending();
+}
+
+/** Start the v2 sync engine (sync.js) for the current space. */
+function startSync(initial) {
+  sync?.stop();
+  const current = space;
+  const engine = createSync({
+    spaceId: current.id,
+    cid: current.cid,
+    getConfig: () => cfg,
+    ensureConfig: loadConfig,
+    request: api,
+    hooks: {
+      snapshot: (items, keepRev) => (alive() ? syncItems(items, false, keepRev) : undefined),
+      add: (item) => (alive() ? addEntry(item, null, true) : undefined),
+      remove: (id) => { if (alive()) dropEntry(id); },
+      usage: (u) => { if (alive()) setUsage(u); },
+      peers: (n) => { if (alive()) onPeers(n); },
+      status: (state) => {
+        if (!alive()) return;
+        setStatus(state);
+        if (state === 'live') { resumePending(); wakeWaiting(); }
+        if (!$('dlgDiag').hidden && $('dlgDiag').open) renderDiag();
+      },
+      gone: () => { if (space === current) spaceGone(); },
+      version: () => { if (alive()) $('versionBanner').hidden = false; },
+    },
+  });
+  const alive = () => space === current && sync === engine;
+  sync = engine;
+  engine.start(initial);
+}
+
+/** Work that needs a known server protocol: restore mirrored texts and consume Android shares. */
+function resumePending() {
+  if (!space || !configLoaded) return;
+  restoreOutbox();
+  consumeShareTarget().catch(() => toast('读取分享内容失败，请重试'));
+}
+
+let lastPeers = null;
+function onPeers(n) {
+  renderIdentity();
+  if ($('dlgAdd').open) renderAddPeers(n, lastPeers);
+  lastPeers = n;
 }
 
 function spaceGone() {
-  localStorage.removeItem(LS.secret);
-  for (const id of [...entries.keys()]) dropEntry(id);
-  showSetup('这个空间已被删除。');
+  const secret = localStorage.getItem(LS.secret);
+  if (secret) localStorage.setItem('ca.secret.prev', secret);
+  const fp = space?.fp;
+  clearFeed();
+  showSetup(`服务器上找不到这个空间${fp ? `（${fp}）` : ''}。可能是空间被删除，或服务器数据被重置。本机的钥匙还在，没有被清除，可以重试或粘贴新的配对链接。`);
 }
 
-function connect() {
-  clearTimeout(retryTimer);
-  es?.close();
-  if (!space) return;
-  const id = space.id;
-  setStatus('connecting');
-  es = new EventSource(`/api/spaces/${id}/events`);
-  es.onopen = () => { setStatus('online'); resync(); };
-  es.onmessage = (ev) => {
-    let m;
-    try { m = JSON.parse(ev.data); } catch { return; }
-    if (m.type === 'add') addEntry(m.item, null, true);
-    else if (m.type === 'delete') dropEntry(m.id);
-    else if (m.type === 'usage') setUsage(m);
-    else if (m.type === 'gone') spaceGone();
-  };
-  es.onerror = () => {
-    setStatus('offline');
-    if (es.readyState === EventSource.CLOSED) {
-      retryTimer = setTimeout(async () => {
-        if (!space || space.id !== id) return;
-        try { await api(`/spaces/${id}`); connect(); } catch (e) { if (e.status === 404) spaceGone(); else connect(); }
-      }, 4000);
-    }
-  };
-}
-
-async function resync() {
-  if (!space) return;
-  try {
-    const data = await (await api(`/spaces/${space.id}/items`)).json();
-    setUsage(data.usage);
-    await syncItems(data.items);
-  } catch (e) {
-    if (e.status === 404) spaceGone();
-  }
-}
-
-async function syncItems(list, initial = false) {
+async function syncItems(list, initial = false, rev = undefined) {
   const ids = new Set(list.map((i) => i.id));
-  for (const id of [...entries.keys()]) if (!ids.has(id)) dropEntry(id);
+  for (const [id, entry] of entries) if (!ids.has(id) && !(Number.isSafeInteger(rev) && entry.localRev > rev)) dropEntry(id);
+  for (const id of undecryptable) if (!ids.has(id)) undecryptable.delete(id);
   for (const raw of list) await addEntry(raw, null, !initial);
   refreshCounts();
 }
@@ -328,9 +435,14 @@ async function syncItems(list, initial = false) {
 // ---------- feed ----------
 async function addEntry(raw, local, live = false) {
   if (!space || entries.has(raw.id)) return entries.get(raw.id);
+  if (!local && undecryptable.has(raw.id)) return undefined;
   const key = space.key;
   let meta;
-  try { meta = local?.meta || (await decryptMeta(key, raw.meta)); } catch { return; }
+  try { meta = local?.meta || (await decryptMeta(key, raw.meta)); }
+  catch {
+    if (space?.key === key && !entries.has(raw.id)) { undecryptable.add(raw.id); refreshCounts(); }
+    return undefined;
+  }
   if (entries.has(raw.id) || !space || space.key !== key) return entries.get(raw.id);
   const entry = { raw, meta, kind: kindOf(meta), mine: meta.did === deviceId };
   if (local?.blob) entry.blob = Promise.resolve(local.blob);
@@ -343,12 +455,14 @@ async function addEntry(raw, local, live = false) {
     entry.el.classList.add('fresh');
     setTimeout(() => entry.el.classList.remove('fresh'), 2400);
     bumpUnread();
+    noteFresh(entry);
   }
   refreshCounts();
   return entry;
 }
 
 function dropEntry(id) {
+  if (undecryptable.delete(id)) refreshCounts();
   const e = entries.get(id);
   if (!e) return;
   entries.delete(id);
@@ -588,28 +702,66 @@ async function copyImage(entry, btn) {
   }
 }
 
-// ---------- sending ----------
-let queue = Promise.resolve();
-function enqueue(job) {
-  const p = queue.then(job, job);
-  queue = p.catch(() => {});
-  return p;
+// ---------- sending (outbox, 02 §7) ----------
+// Text records (<= 64 KB) are mirrored to sessionStorage['ca.outbox'] until committed so a reload resumes them
+// with the SAME itemId and nonce `n` (the server dedups by itemId). Files stay in memory only.
+const OUTBOX_KEY = 'ca.outbox';
+const restoredOutbox = new Set();
+function readOutbox() {
+  try { const value = JSON.parse(sessionStorage.getItem(OUTBOX_KEY) || '[]'); return Array.isArray(value) ? value : []; } catch { return []; }
 }
+function writeOutbox(items) {
+  try { if (items.length) sessionStorage.setItem(OUTBOX_KEY, JSON.stringify(items)); else sessionStorage.removeItem(OUTBOX_KEY); return true; }
+  catch { return false; }
+}
+function forgetOutbox(itemId) { writeOutbox(readOutbox().filter((r) => r.itemId !== itemId)); }
 
-function sendText(text) {
-  if (!text || !text.trim()) return Promise.resolve();
+/** @param {{record?: {itemId: string, n: string}, mirrored?: boolean, onCommit?: Function, onDiscard?: Function}} opts */
+function sendText(text, opts = {}) {
+  if (!text || !text.trim() || !space) return Promise.resolve(false);
   const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-  return enqueue(() => upload({ k: 'text', type: 'text/plain;charset=utf-8', size: blob.size }, blob, '文字'));
+  let { record, mirrored = false } = opts;
+  if (!record) {
+    record = { itemId: newItemId(), n: newNonce() };
+    if (blob.size <= 64 * 1024) {
+      mirrored = writeOutbox([...readOutbox(), { text, spaceId: space.id, ...record }]);
+      if (!mirrored) toast('浏览器无法暂存待发送文字，关闭页面前请确认已发送', 7000);
+    }
+  }
+  return upload({ k: 'text', type: 'text/plain;charset=utf-8', size: blob.size }, blob, '文字', { ...opts, record, mirrored });
+}
+function restoreOutbox() {
+  if (!space || !configLoaded) return;
+  for (const r of readOutbox()) {
+    if (!r || r.spaceId !== space.id || typeof r.text !== 'string' || new Blob([r.text]).size > 64 * 1024 || !validRecord(r) || restoredOutbox.has(r.itemId)) continue;
+    restoredOutbox.add(r.itemId);
+    if (cfg.proto >= 2) { sendText(r.text, { record: { itemId: r.itemId, n: r.n }, mirrored: true }); continue; }
+    const card = h('div', { class: 'transfer item-text failed', role: 'alert' },
+      h('span', {}, '上次未确认发送的文字（旧版服务器无法安全自动重发）'),
+      h('div', { class: 'row' },
+        h('button', { type: 'button', class: 'btn ghost sm', onclick: () => { restoreText(r.text); forgetOutbox(r.itemId); card.remove(); refreshCounts(); } }, '取回文字'),
+        h('button', { type: 'button', class: 'btn ghost sm', onclick: () => { forgetOutbox(r.itemId); card.remove(); refreshCounts(); } }, '丢弃')));
+    $('transfers').prepend(card); refreshCounts();
+  }
+}
+function restoreText(text) {
+  const ta = $('text');
+  if (ta.value && ta.value !== text && !confirm('输入框已有内容，替换为这条待发送文字？')) return false;
+  ta.value = text; autoGrow(); ta.focus();
+  return true;
 }
 
-function sendFile(file, name) {
-  if (!file.size) { toast('跳过空文件'); return Promise.resolve(); }
+function sendFile(file, name, opts = {}) {
+  if (!file.size) { toast('跳过空文件'); return Promise.resolve(false); }
   if (file.size > cfg.maxFileBytes) {
-    toast(`「${file.name || '文件'}」超过上限 ${fmtSize(cfg.maxFileBytes)}`, 4000);
-    return Promise.resolve();
+    const card = h('div', { class: 'transfer item-file failed', role: 'alert' },
+      h('span', {}, `「${file.name || '文件'}」发送失败：超过大小上限 ${fmtSize(cfg.maxFileBytes)}`),
+      h('button', { class: 'btn ghost sm', type: 'button', onclick: async () => { card.remove(); refreshCounts(); if (opts.onDiscard) await opts.onDiscard().catch(() => {}); } }, '丢弃'));
+    $('transfers').prepend(card); refreshCounts();
+    return Promise.resolve(false);
   }
   const fname = name || file.name || stampName('file', file.type || 'application/octet-stream');
-  return enqueue(() => upload({ k: 'file', name: fname, type: file.type || 'application/octet-stream', size: file.size }, file, fname));
+  return upload({ k: 'file', name: fname, type: file.type || 'application/octet-stream', size: file.size }, file, fname, opts);
 }
 
 function sendXhr(method, url, body, headers, onProgress, active) {
@@ -624,7 +776,7 @@ function sendXhr(method, url, body, headers, onProgress, active) {
       let res = {};
       try { res = JSON.parse(xhr.responseText); } catch {}
       if (xhr.status >= 200 && xhr.status < 300) resolve(res);
-      else reject(Object.assign(new Error(res.error || `HTTP ${xhr.status}`), { status: xhr.status }));
+      else reject(Object.assign(new Error(res.error || `HTTP ${xhr.status}`), { status: xhr.status, code: res.code }));
     };
     xhr.onerror = () => { active.delete(xhr); reject(Object.assign(new Error('网络错误'), { status: 0 })); };
     xhr.onabort = () => { active.delete(xhr); reject(Object.assign(new Error('已取消'), { name: 'AbortError' })); };
@@ -632,13 +784,26 @@ function sendXhr(method, url, body, headers, onProgress, active) {
   });
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const retryable = (e) => e.name !== 'AbortError' && (e.status === 0 || e.status === 409 || e.status === 429 || e.status >= 500);
+const RETRY_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000]; // 02 §7: at most 6 automatic retries
+const waiters = new Set(); // wake functions of records in `waiting`
+function wakeWaiting() { for (const w of [...waiters]) w(); }
+const abortError = (msg = '已取消') => Object.assign(new Error(msg), { name: 'AbortError' });
+const retryable = (e) => e.name !== 'AbortError' && e.code !== 'disk_full' && e.code !== 'upload_conflict' && (isNetworkError(e) || e.code === 'in_progress' || e.code === 'incomplete' || e.code === 'upload_not_found' || (e.status === 404 && !e.code) || e.status === 429 || e.status >= 500);
+function failReason(e) {
+  if (e.code === 'too_large' || e.status === 413) return `超过大小上限 ${fmtSize(cfg.maxFileBytes)}`;
+  if (e.code === 'disk_full') return '服务器磁盘已满，请联系管理员';
+  if (e.code === 'storage_busy') return '服务器正忙于其他上传';
+  if (missingSpace(e)) return '空间不存在';
+  if (isNetworkError(e)) return '网络连接失败';
+  if (e.code === 'upload_conflict') return '与未完成的上传冲突，请重新发送';
+  return `服务器错误（${e.code || e.status || '未知'}）`;
+}
 
 function transferCard(label, size, onCancel, kind = 'file') {
   const bar = h('div', { class: 'progress-bar' });
-  const info = h('span', { class: 'muted small' }, '加密中…');
-  const pct = h('span', { class: 'transfer-pct' }, '0%');
+  const info = h('span', { class: 'muted small transfer-info' }, '等待中');
+  const pct = h('span', { class: 'transfer-pct' }, '');
+  const actions = h('div', { class: 'row transfer-actions', hidden: true });
   const el = h('div', { class: `transfer item-${kind}` },
     h('div', { class: 'transfer-head' },
       h('span', { class: 'transfer-icon' }, icon('upload')),
@@ -646,87 +811,160 @@ function transferCard(label, size, onCancel, kind = 'file') {
         h('div', { class: 'transfer-line' }, h('span', { class: 'transfer-name' }, label), pct),
         h('div', { class: 'progress' }, bar),
         info),
-      h('button', { class: 'icon-btn', type: 'button', title: '取消', onclick: onCancel }, icon('x'))));
+      h('button', { class: 'icon-btn', type: 'button', title: '取消', 'aria-label': '取消', onclick: onCancel }, icon('x'))),
+    actions);
   $('transfers').prepend(el);
   refreshCounts();
-  const t0 = performance.now();
+  let t0 = performance.now(), mode = '', onNow = null;
+  const clearMode = () => { if (!mode) return; mode = ''; actions.hidden = true; actions.replaceChildren(); el.classList.remove('waiting', 'failed'); el.removeAttribute('role'); };
+  const btn = (text, fn) => h('button', { class: 'btn ghost sm', type: 'button', onclick: fn }, text);
   return {
+    status(text) { clearMode(); info.textContent = text; },
     update(sent) {
+      if (mode === 'wait') clearMode();
       const p = Math.min(100, (sent / size) * 100);
       bar.style.width = p + '%';
       pct.textContent = Math.floor(p) + '%';
       const secs = (performance.now() - t0) / 1000;
       const speed = sent / Math.max(secs, 0.001);
-      info.textContent = `${fmtSize(Math.min(sent, size))} / ${fmtSize(size)} · ${fmtSize(speed)}/s ${fmtEta((size - sent) / speed)}`;
+      info.textContent = `上传 ${Math.floor(p)}% · ${fmtSize(Math.min(sent, size))} / ${fmtSize(size)} · ${fmtSize(speed)}/s ${fmtEta((size - sent) / speed)}`;
+    },
+    restart() { t0 = performance.now(); },
+    waiting(sec, k, now) {
+      onNow = now;
+      info.textContent = `网络不稳定，${sec} 秒后第 ${k} 次重试`;
+      if (mode !== 'wait') { clearMode(); mode = 'wait'; el.classList.add('waiting'); actions.append(btn('立即重试', () => onNow?.())); actions.hidden = false; }
+    },
+    failed(message, { retry, restore, discard }) {
+      clearMode(); mode = 'failed';
+      el.classList.add('failed'); el.setAttribute('role', 'alert');
+      info.textContent = message;
+      actions.append(btn('重试', retry));
+      if (restore) actions.append(btn('取回文字', restore));
+      actions.append(btn('丢弃', discard));
+      actions.hidden = false;
     },
     remove() { el.remove(); refreshCounts(); },
   };
 }
 
-async function upload(meta, blob, label) {
-  if (!space) return;
-  const { id, key } = space;
-  Object.assign(meta, { dev: deviceName(), did: deviceId, n: b64u(crypto.getRandomValues(new Uint8Array(16))), c: DEFAULT_CHUNK });
-  const count = chunkCount(meta.size, meta.c);
-  const total = cipherSize(meta.size, meta.c);
+let savedTimer = null;
+/** 02 §7 / 03 §2.4: state only what we can prove — saved, and how many other devices are online. */
+function showSaved() {
+  const n = sync?.status === 'offline' ? null : sync?.peers ?? null;
+  const others = n === null ? null : n - 1;
+  const bar = $('savedBar');
+  bar.replaceChildren(icon('check'), h('span', {}, others === null ? '已保存 · 在线设备数暂不可用' : others >= 1 ? `已保存 · 另有 ${others} 台设备在线` : '已保存 · 当前没有其他设备在线'));
+  if (!(others >= 1)) bar.append(h('button', { class: 'btn ghost sm', type: 'button', onclick: openDiag }, '对方看不到？'));
+  bar.hidden = false;
+  clearTimeout(savedTimer);
+  savedTimer = setTimeout(() => { bar.hidden = true; }, others >= 1 ? 2500 : 6000);
+}
+
+/**
+ * One outbox record. itemId and n are fixed for all retries (and across reloads when the caller persisted them),
+ * so the server's X-Item-Id / itemId dedup (02 §4.3–4.4) guarantees at most one item.
+ */
+async function upload(meta, blob, label, opts = {}) {
+  if (!space) return false;
+  const { record, mirrored, onCommit, onDiscard } = opts;
+  const current = space, { id, key } = current;
+  const itemId = validRecord(record) ? record.itemId : newItemId();
+  Object.assign(meta, { dev: deviceName(), did: deviceId, n: validRecord(record) ? record.n : newNonce(), c: DEFAULT_CHUNK });
+  const count = chunkCount(meta.size, meta.c), total = cipherSize(meta.size, meta.c);
+  const v2 = () => cfg.proto >= 2;
   const active = new Set();
-  let cancelled = false; // by the user
-  let stop = false; // any worker failed for good
-  let uploadId = null;
-  const card = transferCard(label, total, () => {
+  let cancelled = false, uploadId = null, running = false, wake = null;
+  const setState = (st) => { if (st) outboxState.set(itemId, st); else outboxState.delete(itemId); };
+  const finish = () => { setState(null); waiters.delete(wake); card.remove(); };
+  const discard = async () => {
+    if (cancelled) return;
     cancelled = true;
     for (const x of active) x.abort();
-  }, meta.k === 'text' ? 'text' : /^image\//.test(meta.type || '') ? 'image' : 'file');
+    wake?.();
+    if (mirrored) forgetOutbox(itemId);
+    if (uploadId) api(`/spaces/${id}/uploads/${uploadId}`, { method: 'DELETE' }).catch(() => {});
+    finish();
+    if (onDiscard) await onDiscard().catch(() => {});
+  };
+  const card = transferCard(label, total, discard, meta.k === 'text' ? 'text' : /^image\//.test(meta.type || '') ? 'image' : 'file');
+  setState('queued');
   const loaded = new Float64Array(count);
   const progress = () => card.update(loaded.reduce((a, b) => a + b, 0));
-  try {
-    const metaStr = await encryptMeta(key, meta);
-    let raw;
+  const backoff = (ms, n) => new Promise((resolve) => {
+    setState('waiting');
+    const until = Date.now() + ms;
+    let timer = null;
+    const done = () => { clearInterval(timer); waiters.delete(done); if (wake === done) wake = null; resolve(); };
+    wake = done;
+    waiters.add(done);
+    timer = setInterval(() => { const left = until - Date.now(); if (left <= 0) done(); else card.waiting(Math.ceil(left / 1000), n + 1, done); }, 250);
+    card.waiting(Math.ceil(ms / 1000), n + 1, done);
+  });
+  let metaStr;
+  const attempt = async () => {
+    if (cancelled || space !== current) throw abortError('已取消或空间已切换');
+    setState('encrypting'); card.status('加密中…'); card.restart();
+    metaStr ||= await encryptMeta(key, meta);
     if (count === 1) {
       const ct = await encryptChunk(key, blob, meta, 0);
-      raw = await sendXhr('POST', `/api/spaces/${id}/items`, ct, { 'Content-Type': 'application/octet-stream', 'X-Meta': metaStr },
-        (l) => { loaded[0] = l; progress(); }, active);
-    } else {
-      ({ uploadId } = await (await postJson(`/spaces/${id}/uploads`, { size: total, chunk: meta.c + GCM_OVERHEAD, meta: metaStr })).json());
-      let next = 0;
-      const worker = async () => {
-        while (!cancelled && !stop && next < count) {
-          const i = next++;
-          for (let attempt = 0; ; attempt++) {
-            try {
-              const ct = await encryptChunk(key, blob, meta, i);
-              if (cancelled) throw Object.assign(new Error('已取消'), { name: 'AbortError' });
-              await sendXhr('PUT', `/api/spaces/${id}/uploads/${uploadId}/${i}`, ct, { 'Content-Type': 'application/octet-stream' },
-                (l) => { loaded[i] = l; progress(); }, active);
-              loaded[i] = ct.byteLength;
-              progress();
-              break;
-            } catch (e) {
-              loaded[i] = 0;
-              if (!retryable(e) || attempt >= 5 || cancelled || stop) { stop = true; throw e; }
-              await sleep(1000 * 2 ** attempt);
-            }
-          }
-        }
-      };
-      await Promise.all(Array.from({ length: Math.min(PARALLEL, count) }, worker));
-      if (cancelled) throw Object.assign(new Error('已取消'), { name: 'AbortError' });
-      raw = await (await postJson(`/spaces/${id}/uploads/${uploadId}/complete`, {})).json();
+      if (cancelled) throw abortError();
+      setState('uploading');
+      return sendXhr('POST', `/api/spaces/${id}/items`, ct, { 'Content-Type': 'application/octet-stream', 'X-Meta': metaStr, ...(v2() ? { 'X-Item-Id': itemId } : {}) }, (l) => { loaded[0] = l; progress(); }, active);
     }
-    const existing = entries.get(raw.id);
-    const small = meta.size <= PREVIEW_MAX ? blob : null;
-    if (existing) { if (!existing.blob && small) existing.blob = Promise.resolve(small); }
-    else await addEntry(raw, { meta, blob: small });
-  } catch (e) {
-    stop = true;
-    for (const x of active) x.abort();
-    if (uploadId) api(`/spaces/${id}/uploads/${uploadId}`, { method: 'DELETE' }).catch(() => {});
-    if (cancelled) toast('已取消发送');
-    else if (e.status === 404 && !uploadId) spaceGone();
-    else toast(`发送失败：${e.status === 413 ? '超过大小上限' : e.status === 507 ? '服务器空间不足' : e.message}`, 4000);
-  } finally {
-    card.remove();
-  }
+    const session = await (await postJson(`/spaces/${id}/uploads`, { size: total, chunk: meta.c + GCM_OVERHEAD, meta: metaStr, ...(v2() ? { itemId } : {}) })).json();
+    if (session.done) return session.item;
+    uploadId = session.uploadId;
+    setState('uploading');
+    const received = new Set(session.received || []);
+    for (let i = 0; i < count; i++) {
+      if (cancelled) throw abortError();
+      if (received.has(i)) { loaded[i] = Math.min(meta.c + GCM_OVERHEAD, total - i * (meta.c + GCM_OVERHEAD)); progress(); continue; }
+      const ct = await encryptChunk(key, blob, meta, i);
+      await sendXhr('PUT', `/api/spaces/${id}/uploads/${uploadId}/${i}`, ct, { 'Content-Type': 'application/octet-stream' }, (l) => { loaded[i] = l; progress(); }, active);
+      loaded[i] = ct.byteLength; progress();
+    }
+    return (await postJson(`/spaces/${id}/uploads/${uploadId}/complete`, {})).json();
+  };
+  const run = async () => {
+    if (running || cancelled) return false;
+    running = true;
+    try {
+      let raw;
+      for (let n = 0; ; n++) {
+        try { raw = await attempt(); break; }
+        catch (e) {
+          // Without server-side idempotency (old server) an automatic retry could duplicate the item: manual only.
+          if (cancelled || !v2() || !retryable(e) || n >= RETRY_DELAYS.length) throw e;
+          if (e.code === 'upload_not_found') uploadId = null;
+          await backoff(e.code === 'in_progress' ? 1500 : RETRY_DELAYS[n], n);
+          if (cancelled) throw abortError();
+        }
+      }
+      if (space === current) {
+        const existing = entries.get(raw.id), small = meta.size <= PREVIEW_MAX ? blob : null;
+        const added = existing || await addEntry(raw, { meta, blob: small });
+        if (added) { if (!added.blob && small) added.blob = Promise.resolve(small); if (Number.isSafeInteger(raw.rev)) added.localRev = raw.rev; }
+        if (!Number.isSafeInteger(raw.rev)) sync?.resync(); // R7: duplicate / done:true carry no rev
+      }
+      finish();
+      if (mirrored) forgetOutbox(itemId);
+      if (onCommit) await onCommit().catch(() => toast('已保存，但未能清除本机分享缓存', 7000));
+      if (space === current) showSaved();
+      return true;
+    } catch (e) {
+      if (cancelled) return false;
+      if (missingSpace(e)) { spaceGone(); return false; } // mirrored text stays in sessionStorage
+      setState('failed');
+      card.failed(`发送失败：${failReason(e)}${!v2() && retryable(e) ? '（旧版服务器，重试可能产生重复）' : ''}`, {
+        retry: () => run(),
+        restore: meta.k === 'text' ? async () => { if (restoreText(await blob.text())) await discard(); } : null,
+        discard,
+      });
+      return false;
+    } finally { running = false; }
+  };
+  return run();
 }
 
 async function pasteFromClipboard() {
@@ -764,29 +1002,89 @@ function sendComposer() {
   const ta = $('text');
   const t = ta.value;
   if (!t.trim()) return ta.focus();
+  sendText(t);
   ta.value = '';
   autoGrow();
-  sendText(t);
 }
 
 // ---------- share target (Android PWA) ----------
-async function consumeShareTarget() {
-  if (new URLSearchParams(location.search).has('share')) history.replaceState(null, '', '/');
-  if (!('caches' in window) || !space || !(await caches.has(SHARE_CACHE))) return;
+// The SW stores each share as /_share/batch/<uuid>/{meta,text,file/<i>}. Before the first upload attempt we
+// persist an {itemId, n} per entry into that batch's meta, so if the page is reloaded/killed after the server
+// committed but before the cache entry was deleted, the resend carries the same itemId and the server answers
+// "duplicate" instead of creating a second item. Cache entries are deleted only after commit (or explicit discard).
+const SHARE_META_RE = /^\/_share\/(?:batch\/[^/]+\/)?meta$/;
+const shareAttempted = new Set(); // cache keys already handed to the outbox in this page (failed ones keep their card)
+let shareRun = null;
+function consumeShareTarget() {
+  if (!space || !configLoaded || !('caches' in window)) return Promise.resolve();
+  if (shareRun) return shareRun;
+  // One tab at a time; a second tab would only produce in_progress/duplicate answers anyway.
+  const work = navigator.locks?.request
+    ? navigator.locks.request('ca-share', { ifAvailable: true }, (lock) => (lock ? processShares() : null))
+    : processShares();
+  shareRun = Promise.resolve(work).finally(() => { shareRun = null; });
+  return shareRun;
+}
+
+async function processShares() {
+  if (!(await caches.has(SHARE_CACHE))) return;
+  const current = space;
   const cache = await caches.open(SHARE_CACHE);
-  const metaRes = await cache.match('/_share/meta');
-  if (!metaRes) return caches.delete(SHARE_CACHE);
-  const { text, files } = await metaRes.json();
-  const blobs = [];
-  for (let i = 0; i < files.length; i++) {
-    const r = await cache.match(`/_share/file/${i}`);
-    if (r) blobs.push(new File([await r.blob()], files[i].name, { type: files[i].type }));
+  const jobs = [];
+  for (const request of await cache.keys()) {
+    const metaPath = new URL(request.url).pathname;
+    if (!SHARE_META_RE.test(metaPath)) continue;
+    const prefix = metaPath.slice(0, -4);
+    let data;
+    try { data = await (await cache.match(request)).json(); } catch { data = null; }
+    if (!data || typeof data !== 'object') { await cache.delete(request); continue; }
+    data.files = Array.isArray(data.files) ? data.files : [];
+    data.ids = data.ids && typeof data.ids === 'object' ? data.ids : {};
+    let dirty = false;
+    if (typeof data.text === 'string') { // legacy format kept the text inside meta
+      if (!(await cache.match(prefix + 'text'))) await cache.put(prefix + 'text', new Response(data.text));
+      delete data.text;
+      dirty = true;
+    }
+    const present = [];
+    for (const k of ['text', ...data.files.map((_, i) => `file/${i}`)]) if (await cache.match(prefix + k)) present.push(k);
+    if (!present.length) { await cache.delete(metaPath); continue; }
+    for (const k of present) if (!validRecord(data.ids[k])) { data.ids[k] = { itemId: newItemId(), n: newNonce() }; dirty = true; }
+    if (dirty) await cache.put(metaPath, new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } }));
+    const cleanup = (key) => async () => {
+      await cache.delete(key);
+      const remaining = (await cache.keys()).some((r) => { const p = new URL(r.url).pathname; return p.startsWith(prefix) && p !== metaPath; });
+      if (!remaining) await cache.delete(metaPath);
+    };
+    for (const k of present) {
+      const key = prefix + k;
+      if (shareAttempted.has(key)) continue;
+      shareAttempted.add(key);
+      jobs.push({ key, k, data, cleanup: cleanup(key) });
+    }
   }
-  await caches.delete(SHARE_CACHE).catch(() => {});
-  const jobs = blobs.map((f) => sendFile(f));
-  if (text) jobs.push(sendText(text));
-  await Promise.all(jobs);
-  if (jobs.length) toast('分享内容已发送');
+  let failed = 0, sent = 0;
+  for (let j = 0; j < jobs.length; j++) {
+    const job = jobs[j];
+    if (space !== current) { for (const rest of jobs.slice(j)) shareAttempted.delete(rest.key); break; }
+    const r = await cache.match(job.key);
+    if (!r) continue;
+    const opts = { record: job.data.ids[job.k], onCommit: job.cleanup, onDiscard: job.cleanup };
+    let ok;
+    if (job.k === 'text') {
+      const t = await r.text();
+      if (!t.trim()) { await job.cleanup(); continue; }
+      ok = await sendText(t, opts);
+    } else {
+      const b = await r.blob();
+      if (!b.size) { await job.cleanup(); continue; }
+      const fm = job.data.files[Number(job.k.slice(5))] || {};
+      ok = await sendFile(new File([b], fm.name || `shared-${Date.now()}`, { type: fm.type || b.type || 'application/octet-stream' }), undefined, opts);
+    }
+    if (ok) sent++; else failed++;
+  }
+  if (failed) toast(`${failed} 条分享发送失败，已留在发件箱，可重试或丢弃`, 7000);
+  else if (sent) toast(`分享的 ${sent} 条内容已发送`);
 }
 
 // ---------- dialogs ----------
@@ -813,7 +1111,123 @@ function openAdd() {
   const link = `${location.origin}/#s=${space.secret}`;
   drawQr(link);
   $('link').value = link;
+  $('addIdentity').textContent = `空间 ${space.fp}`;
+  $('addHint').textContent = `加入后，对方顶部也会显示 ${space.fp}。`;
+  renderAddPeers(sync?.peers ?? null, null);
   $('dlgAdd').showModal();
+}
+/** Live device count while the add-device dialog is open (03 §3.4). */
+function renderAddPeers(n, before) {
+  const el = $('addPeers');
+  el.classList.toggle('ok', n !== null && before !== null && n > before);
+  el.textContent = n === null ? '在线设备数暂不可用'
+    : before !== null && n > before ? `✓ 新设备已加入：现在 ${n} 台设备在线`
+    : n <= 1 ? '当前在线：1 台（等待新设备…）' : `当前在线：${n} 台`;
+}
+
+// ---------- diagnostics (02 §10.2, 03 §2.5) ----------
+let diagServer = null, diagTimer = null;
+function openDiag() {
+  if (!space) return;
+  diagServer = null;
+  renderDiag();
+  if (!$('dlgDiag').open) $('dlgDiag').showModal();
+  clearInterval(diagTimer);
+  diagTimer = setInterval(() => { if ($('dlgDiag').open) renderDiag(); else clearInterval(diagTimer); }, 1000);
+  api(`/spaces/${space.id}/diag`).then((r) => r.json()).then((d) => { diagServer = d; renderDiag(); }).catch((e) => { diagServer = { error: e.code || (isNetworkError(e) ? 'network' : `http_${e.status}`) }; renderDiag(); });
+}
+const secs = (ms) => (ms == null ? '—' : `${Math.round(ms / 1000)} 秒`);
+function outboxCounts() {
+  const c = {};
+  for (const st of outboxState.values()) c[st] = (c[st] || 0) + 1;
+  return c;
+}
+function diagReport() {
+  const i = sync?.info() || {};
+  const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  return {
+    generated: new Date().toISOString(),
+    space: { fingerprint: space?.fp ?? null, idPrefix: space ? space.id.slice(0, 6) : null },
+    device: deviceName(),
+    standalone,
+    secureContext: globalThis.isSecureContext,
+    online: navigator.onLine,
+    proto: { client: 2, server: cfg.proto ?? null, serverVersion: cfg.version ?? null, configLoaded },
+    connection: {
+      status: i.status ?? null,
+      since: i.statusSince ? new Date(i.statusSince).toISOString() : null,
+      stream: i.proto === 2 ? 'v2' : 'v1',
+      epoch: i.epoch ?? null, applied: i.applied ?? null, serverRev: i.serverRev ?? null,
+      lastFrameAgoSec: i.lastFrameAgoMs == null ? null : Math.round(i.lastFrameAgoMs / 1000),
+      reconnectFailures: i.failures ?? 0, nextRetryInSec: i.nextRetryInMs == null ? null : Math.round(i.nextRetryInMs / 1000),
+      loopback: i.echo ? { result: i.echo.result, rttMs: i.echo.rttMs, streams: i.echo.streams } : null,
+      snapshotError: i.snapshotError ?? null,
+    },
+    peers: i.peers ?? null,
+    outbox: outboxCounts(),
+    undecryptable: undecryptable.size,
+    serviceWorker: !('serviceWorker' in navigator) ? 'unsupported' : navigator.serviceWorker.controller ? 'active' : 'not-controlling',
+    server: diagServer,
+  };
+}
+function renderDiag() {
+  if (!space) return;
+  const i = sync?.info() || {};
+  const st = i.status;
+  $('diagStep1').textContent = `本机空间：${space.fp}`;
+  $('diagStep2').textContent = i.peers == null || st === 'offline' ? '在线设备数暂不可用' : i.peers <= 1 ? '只有本机在线' : `当前在线：${i.peers} 台`;
+  $('diagStep2').classList.toggle('warn', i.peers != null && i.peers <= 1);
+  const echo = i.echo || {};
+  $('diagStep3').textContent = st === 'live'
+    ? (echo.result === 'ok' ? `实时同步正常（往返 ${echo.rttMs} ms）` : echo.result === 'pending' ? '实时同步已连接，正在自测…' : '实时同步已连接')
+    : st === 'degraded' ? (echo.result === 'fail' ? '实时通道被缓冲或阻断，已改为每 5 秒同步' : '实时通道不通，已改为每 5 秒同步')
+    : st === 'offline' ? '本机离线，恢复后自动同步' : '正在连接…';
+  $('diagStep3').classList.toggle('warn', st !== 'live');
+  const r = diagReport();
+  const rows = [
+    ['空间', `${r.space.fingerprint} · ID ${r.space.idPrefix}…`],
+    ['本机', `${r.device}${r.standalone ? ' · 主屏幕 App' : ''}${r.secureContext ? '' : ' · 非安全上下文'}`],
+    ['协议', `客户端 2 / 服务端 ${r.proto.server ?? '未知'}${r.proto.serverVersion ? `（${r.proto.serverVersion}）` : ''}`],
+    ['状态', `${STATUS_TEXT[st] || '—'}${i.statusSince ? ` · 已持续 ${secs(Date.now() - i.statusSince)}` : ''}`],
+    ['同步位置', `epoch ${r.connection.epoch ?? '—'} · 已应用 rev ${r.connection.applied ?? '—'} · 服务端 rev ${diagServer?.rev ?? r.connection.serverRev ?? '—'}`],
+    ['最近一帧', i.lastFrameAgoMs == null ? '—' : `${secs(i.lastFrameAgoMs)}前`],
+    ['回环自测', echo.result === 'ok' ? `通过 · ${echo.rttMs} ms` : echo.result === 'fail' ? '失败（5 秒内未收到）' : echo.result === 'pending' ? '进行中' : '—'],
+    ['重连', i.nextRetryInMs != null ? `${secs(i.nextRetryInMs)}后重试（已失败 ${i.failures} 次）` : `连续失败 ${i.failures ?? 0} 次`],
+    ['发件箱', Object.entries(r.outbox).map(([k, v]) => `${k} ${v}`).join(' · ') || '空'],
+    ['无法解密', String(r.undecryptable)],
+    ['Service Worker', r.serviceWorker],
+    ['服务端视角', !diagServer ? '读取中…' : diagServer.error ? `读取失败（${diagServer.error}）` : `条目 ${diagServer.items} · v2 流 ${diagServer.streams?.v2 ?? 0} / v1 流 ${diagServer.streams?.v1 ?? 0}`],
+  ];
+  $('diagTable').replaceChildren(...rows.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]));
+}
+
+function parseJoin(input) {
+  const value = input.trim();
+  if (validSecret(value)) return value;
+  try {
+    const url = new URL(value);
+    if (url.origin !== location.origin) return null;
+    const secret = new URLSearchParams(url.hash.slice(1)).get('s');
+    return validSecret(secret) ? secret : null;
+  } catch { return null; }
+}
+async function joinSpace(secret) {
+  if (!validSecret(secret)) throw new Error('链接或密钥不完整，请重新复制。');
+  const { id } = await deriveSpace(secret);
+  try { await api(`/spaces/${id}`); }
+  catch (e) { throw new Error(missingSpace(e) ? '链接指向的空间不存在，原有空间未改变。' : '无法验证目标空间，请检查网络后重试。'); }
+  const old = localStorage.getItem(LS.secret);
+  if (old === secret && space?.secret === secret) return true;
+  if (old && old !== secret) {
+    if ($('transfers').children.length) throw new Error('请先完成或取消正在发送的内容，再切换空间。');
+    const oldId = (await deriveSpace(old)).id;
+    if (!confirm(`从空间 ${await fingerprint(oldId)} 切换到空间 ${await fingerprint(id)}？原空间不会被删除。`)) return false;
+  }
+  localStorage.setItem(LS.secret, secret);
+  localStorage.removeItem('ca.secret.prev');
+  clearFeed();
+  await openSpace(secret);
+  return true;
 }
 
 // ---------- wiring ----------
@@ -821,9 +1235,21 @@ function wire() {
   $('hint').textContent = touch ? '' : 'Enter 发送 · Shift+Enter 换行 · 页面任意处 ⌘/Ctrl+V 直接发送 · 可拖入文件';
   $('text').placeholder = touch ? '输入或长按粘贴文字…' : '输入文字，或直接粘贴截图 / 文件…';
 
+  $('formJoin').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const secret = parseJoin($('joinLink').value);
+    try { if (await joinSpace(secret)) $('joinLink').value = ''; }
+    catch (err) { if (space) toast(err.message, 6000); else showSetup(err.message); }
+  });
+  $('retrySpace').addEventListener('click', () => { const secret = localStorage.getItem(LS.secret) || localStorage.getItem('ca.secret.prev'); if (validSecret(secret)) openSpace(secret).catch(() => showSetup('连接失败，请重试。')); });
+  $('forgetSpace').addEventListener('click', () => {
+    if (!confirm('仅在本机移除密钥？以后需要重新获取配对链接。')) return;
+    localStorage.removeItem(LS.secret); localStorage.removeItem('ca.secret.prev'); showSetup();
+  });
   $('formCreate').addEventListener('submit', async (e) => {
     e.preventDefault();
     const pw = $('pw').value;
+    if (localStorage.getItem(LS.secret) && !confirm('创建新空间将替换本机保存的密钥，请先备份原空间配对链接。继续吗？')) return;
     const btn = e.submitter || $('formCreate').querySelector('button');
     btn.disabled = true;
     try {
@@ -855,9 +1281,7 @@ function wire() {
 
   $('chips').addEventListener('click', (e) => {
     const chip = e.target.closest('.chip');
-    if (!chip) return;
-    for (const c of $('chips').children) c.classList.toggle('active', c === chip);
-    $('feed').dataset.filter = chip.dataset.filter;
+    if (chip) setFilter(chip.dataset.filter);
   });
 
   document.addEventListener('paste', (e) => {
@@ -876,7 +1300,7 @@ function wire() {
     const target = e.target;
     if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) return;
     const text = dt.getData('text/plain');
-    if (text && text.trim()) { e.preventDefault(); sendText(text); toast('已发送剪贴板文字'); }
+    if (text && text.trim()) { e.preventDefault(); sendText(text); }
   });
 
   let dragDepth = 0;
@@ -893,6 +1317,23 @@ function wire() {
   });
 
   $('btnAdd').addEventListener('click', openAdd);
+  for (const b of ['btnDiag', 'status', 'spaceIdentity', 'connNoticeMore', 'btnDiagSettings']) $(b).addEventListener('click', () => { if ($('dlgSettings').open) $('dlgSettings').close(); openDiag(); });
+  $('dlgDiag').addEventListener('close', () => clearInterval(diagTimer));
+  $('diagRetest').addEventListener('click', () => { sync?.retestEcho(); sync?.resync(); renderDiag(); });
+  $('diagCopyLink').addEventListener('click', () => copyText(`${location.origin}/#s=${space.secret}`, $('diagCopyLink')));
+  $('copyDiag').addEventListener('click', async () => {
+    // No secret, no full space ID, no content: only fingerprint, 6-char ID prefix and counters (02 §9, §10.2).
+    const report = JSON.stringify(diagReport(), null, 2);
+    copyText(report, $('copyDiag'));
+  });
+  $('filterHintView').addEventListener('click', () => { setFilter($('filterHintView').dataset.filter || 'all'); $('feed').scrollIntoView({ block: 'start', behavior: 'smooth' }); });
+  $('freshPill').addEventListener('click', () => { freshAbove = 0; renderFreshHints(); $('feed').scrollIntoView({ block: 'start', behavior: 'smooth' }); });
+  window.addEventListener('scroll', () => { if (freshAbove && !feedTopHidden()) { freshAbove = 0; renderFreshHints(); } }, { passive: true });
+  $('undecryptableDismiss').addEventListener('click', () => { $('undecryptable').hidden = true; });
+  $('versionBanner').addEventListener('click', () => {
+    if (outboxState.size && !confirm('还有内容正在发送，刷新会中断文件上传（文字会在刷新后自动继续）。仍要刷新吗？')) return;
+    location.reload();
+  });
   $('btnCopyLink').addEventListener('click', () => copyText($('link').value, $('btnCopyLink')));
   $('dlgView').addEventListener('click', (e) => { if (e.target === $('dlgView') || e.target === $('viewImg')) $('dlgView').close(); });
 
@@ -919,6 +1360,7 @@ function wire() {
   $('btnLeave').addEventListener('click', () => {
     if (!confirm('在本设备退出？之后需要重新扫码才能加入。')) return;
     localStorage.removeItem(LS.secret);
+    localStorage.removeItem('ca.secret.prev');
     location.replace('/');
   });
   $('btnDestroy').addEventListener('click', async () => {
@@ -933,9 +1375,12 @@ function wire() {
     unread = 0;
     document.title = 'CopyAnywhere';
     if (!space) return;
-    if (!es || es.readyState === EventSource.CLOSED) connect(); else resync();
+    sync?.visible(); // R9
+    wakeWaiting();   // 02 §7: waiting records retry immediately when the page comes back
   });
-  window.addEventListener('beforeunload', (e) => { if ($('transfers').children.length) e.preventDefault(); });
+  window.addEventListener('online', () => { sync?.online(); wakeWaiting(); });
+  window.addEventListener('offline', () => { sync?.offline(); });
+  window.addEventListener('beforeunload', (e) => { if ([...outboxState.values()].some((st) => st !== 'failed')) e.preventDefault(); });
 
   setInterval(() => {
     for (const t of document.querySelectorAll('.time[data-ts]')) {
@@ -946,17 +1391,31 @@ function wire() {
 }
 
 async function init() {
+  const fragment = location.hash;
+  const shareParam = new URLSearchParams(location.search).get('share');
+  // remove the key (fragment) and the one-shot ?share= flag immediately
+  if (fragment || shareParam) history.replaceState(null, '', location.pathname);
   hydrateIcons();
+  if (!globalThis.isSecureContext || !globalThis.crypto?.subtle) {
+    $('viewSetup').hidden = false;
+    $('formJoin').hidden = true; $('formCreate').hidden = true;
+    $('setupProblem').hidden = false;
+    $('setupError').textContent = '需要安全连接（HTTPS 或 localhost）才能使用端到端加密。';
+    $('retrySpace').hidden = true; $('forgetSpace').hidden = true;
+    return;
+  }
+  if (!deviceId) { deviceId = b64u(crypto.getRandomValues(new Uint8Array(9))); localStorage.setItem(LS.did, deviceId); }
   wire();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
-  try { cfg = { ...cfg, ...(await (await api('/config')).json()) }; } catch {}
-
-  const m = location.hash.match(/[#&]s=([A-Za-z0-9_-]{43})(?:&|$)/);
-  if (location.hash) history.replaceState(null, '', location.pathname + location.search); // never keep the key in the URL bar
-  if (m) localStorage.setItem(LS.secret, m[1]);
-
+  if (shareParam === 'lost') toast('这次分享没有收到，请重新分享。', 7000);
+  try { await loadConfig(); } catch {} // retried by the sync engine before each (re)connect
   const secret = localStorage.getItem(LS.secret);
   if (validSecret(secret)) await openSpace(secret); else showSetup();
+  if (fragment) {
+    const candidate = new URLSearchParams(fragment.slice(1)).get('s');
+    try { await joinSpace(candidate); }
+    catch (e) { if (space) toast(e.message, 7000); else showSetup(e.message); }
+  }
 }
 
-init();
+init().catch(() => { showSetup('启动失败，请检查浏览器与网络后重试。'); });
